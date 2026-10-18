@@ -79,7 +79,7 @@ export function variableFacts(session: MenuSession, overrides: Readonly<Record<s
 	const view = session.currentView();
 	const applied = session.appliedView();
 	const values = session.currentValues();
-	return Object.keys(values).map((name) => {
+	const facts: VariableFacts[] = Object.keys(values).map((name) => {
 		const ageMs = session.computedAge(name);
 		const computed = ageMs !== undefined;
 		const implicit = isImplicit(name);
@@ -94,10 +94,24 @@ export function variableFacts(session: MenuSession, overrides: Readonly<Record<s
 			changed: applied[name] !== view[name],
 		};
 	});
+	for (const name of Object.keys(view)) {
+		if (!isImplicit(name)) continue;
+		facts.push({
+			name,
+			value: view[name],
+			values: undefined,
+			computed: false,
+			ageMs: undefined,
+			overridden: false,
+			implicit: true,
+			changed: applied[name] !== view[name],
+		});
+	}
+	return facts;
 }
 
 /** Menu item action. */
-export type MenuAction = "change" | "recompute" | "recomputeAll" | "apply" | "rewriteFiles";
+export type MenuAction = "change" | "recompute" | "implicit" | "recomputeAll" | "apply" | "rewriteFiles";
 
 /** Menu item. */
 export interface MenuItem {
@@ -108,15 +122,15 @@ export interface MenuItem {
 
 /**
  * Menu items: overridable variables (change value), computed ones (recompute
- * the given one), recompute all, apply and rewrite files on disk. Computed
- * and implicit variables are not offered for change, implicit ones are not
- * shown at all.
+ * the given one), recompute all, apply and rewrite files on disk. Implicit
+ * `model`/`level` are rows of the list as well — read-only, they change
+ * during a session (pi's model and thinking level controls).
  */
 export function menuItems(facts: readonly VariableFacts[]): MenuItem[] {
 	const items: MenuItem[] = [];
 	for (const fact of facts) {
-		if (fact.implicit) continue;
-		items.push(fact.computed ? { action: "recompute", facts: fact } : { action: "change", facts: fact });
+		if (fact.implicit) items.push({ action: "implicit", facts: fact });
+		else items.push(fact.computed ? { action: "recompute", facts: fact } : { action: "change", facts: fact });
 	}
 	items.push({ action: "recomputeAll" }, { action: "apply" }, { action: "rewriteFiles" });
 	return items;
@@ -166,11 +180,6 @@ export function formatAge(ageMs: number): string {
 /** Session context status glyph: `✓` applied, `!` a re-render is waiting, `‼` no view. */
 export function contextStatusMark(stale: boolean | undefined): string {
 	return stale === undefined ? "‼" : stale ? "!" : "✓";
-}
-
-/** Implicit variable row: session `model`/`level`, read-only. */
-export function implicitLine(view: Record<string, string>): string {
-	return `model = ${view.model ?? "—"} · level = ${view.level ?? "—"} (implicit, read-only)`;
 }
 
 /**

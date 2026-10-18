@@ -126,8 +126,8 @@ Config rules:
 
 - variable names are identifiers; the name is the env variable name, and a
   collision with the process environment is an error;
-- `model` and `level` are implicit and read-only; declaring them is an
-  error;
+- `model` and `level` are implicit: declared by pi itself, read-only for
+  the config; declaring them is an error;
 - an unknown key is an error; a broken `template.json` means the view is not
   built and there is no re-render, with a warning naming the reason;
 - commands run in the platform system shell; string substitution of values
@@ -186,12 +186,13 @@ The extension's only command opens the context management menu:
 
 - session context status as one glyph: `✓` applied, `!` a re-render is
   waiting, `‼` no view built (a broken config);
-- implicit `model`/`level` as a read-only row;
-- rows of declared variables: the value; for computed ones the value age and
+- rows of the variables: the value; for computed ones the value age and
   recompute on Enter; for overridden ones "session override"; the variable
   status as the last segment — a colored glyph: `✓` green (the value is in
   the applied context) or `!` yellow (it differs — the context has not
-  been applied since);
+  been applied since); implicit `model`/`level` are rows of the list as
+  well — read-only, they change during a session (model switch, thinking
+  level), so their status matters like any other's;
 - "recompute all variables";
 - "update current session context" — applying the current version;
 - "rewrite files on disk" — writing the current version into the targets

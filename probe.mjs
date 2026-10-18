@@ -49,7 +49,6 @@ import { createPartialResolver, discoverSources } from "./sources.ts";
 import {
 	changeVariable,
 	formatAge,
-	implicitLine,
 	menuRowSegments,
 	variableStatusMark,
 	menuItems,
@@ -2535,8 +2534,8 @@ scenario("when_status_variable_write_fails_then_variable_unchanged", async () =>
 	});
 });
 
-/** Change menu: overridable only; computed — recompute, implicit hidden. */
-scenario("when_menu_selected_then_computed_and_implicit_excluded", async () => {
+/** Menu: every variable is a row with a status; implicit ones read-only. */
+scenario("when_menu_built_then_implicit_rows_with_status", async () => {
 	// A live session returns only declared variables in `currentValues()`
 	// (declaring `model`/`level` is a config error), so the "implicit are not
 	// offered" guarantee is their absence from the facts.
@@ -2547,36 +2546,37 @@ scenario("when_menu_selected_then_computed_and_implicit_excluded", async () => {
 		computedAge: (name) => (name === "branch" ? 3200 : undefined),
 	};
 	const facts = variableFacts(session, { role: "develop" });
-	assertEqual(facts.map((fact) => fact.name), ["role", "branch"], "menu variable order");
-	assertEqual(
-		facts.some((fact) => fact.name === "model" || fact.name === "level"),
-		false,
-		"implicit variables got into the facts",
-	);
+	assertEqual(facts.map((fact) => fact.name), ["role", "branch", "model", "level"], "menu row order");
 	assertEqual(facts[0].overridden, true, "session override not marked");
 	assertEqual(facts[0].changed, true, "unapplied override not marked changed");
 	assertEqual(facts[1].computed, true, "computed variable not marked");
 	assertEqual(facts[1].changed, false, "value matching the applied context not marked current");
 	assertEqual(facts[1].ageMs, 3200, "computed value age not passed through");
+	const model = facts.find((fact) => fact.name === "model");
+	assertEqual(model?.implicit, true, "model is an implicit row");
+	assertEqual(model?.changed, false, "unchanged model not marked changed");
 	const items = menuItems(facts);
 	assertEqual(
 		items.map((item) => [item.action, item.facts?.name ?? null]),
 		[
 			["change", "role"],
 			["recompute", "branch"],
+			["implicit", "model"],
+			["implicit", "level"],
 			["recomputeAll", null],
 			["apply", null],
 			["rewriteFiles", null],
 		],
 		"menu composition",
 	);
-	assertEqual(items.some((item) => item.facts?.name === "model" || item.facts?.name === "level"), false, "implicit variable got into the menu");
 	const rowText = (item) => menuRowSegments(item).map((segment) => (segment.kind === "status" ? variableStatusMark(segment.changed) : segment.text)).join(" · ");
 	assertEqual(rowText(items[0]), "role = develop · session override · !", "unapplied variable row");
 	assertEqual(rowText(items[1]), "branch = main · computed, 3 s — Enter: recompute · ✓", "applied computed row");
-	assertEqual(rowText(items[2]), "recompute all variables", "recompute-all row");
-	assertEqual(rowText(items[3]), "update current session context", "apply row");
-	assertEqual(rowText(items[4]), "rewrite files on disk", "rewrite-files row");
+	assertEqual(rowText(items[2]), "model = deepseek/flash · ✓", "implicit model row");
+	assertEqual(rowText(items[3]), "level = max · ✓", "implicit level row");
+	assertEqual(rowText(items[4]), "recompute all variables", "recompute-all row");
+	assertEqual(rowText(items[5]), "update current session context", "apply row");
+	assertEqual(rowText(items[6]), "rewrite files on disk", "rewrite-files row");
 	assertEqual(
 		items.filter((item) => item.action === "apply" || item.action === "rewriteFiles").map((item) => item.action),
 		["apply", "rewriteFiles"],
@@ -2657,12 +2657,6 @@ scenario("when_status_text_then_glyph_and_status_variable", async () => {
 		"long value not truncated",
 	);
 	assertEqual(statusLineText(undefined, undefined, {}), "template ‼", "status without a view");
-	assertEqual(
-		implicitLine({ model: "p/m", level: "max" }),
-		"model = p/m · level = max (implicit, read-only)",
-		"implicit variable row",
-	);
-	assertEqual(implicitLine({}), "model = — · level = — (implicit, read-only)", "implicit row without values");
 });
 
 /** Status variable ring: declared variables with a non-empty value list. */
@@ -2713,18 +2707,16 @@ scenario("when_menu_facts_from_session_then_age_and_override", async () => {
 			[
 				["who", false, true],
 				["branch", true, false],
+				["model", false, false],
+				["level", false, false],
 			],
 			"session facts for the menu",
 		);
 		assertEqual(facts[1].ageMs, 3500, "computed variable age in the menu");
-		assertEqual(
-			facts.some((fact) => fact.name === "model" || fact.name === "level"),
-			false,
-			"implicit variables got into the session facts",
-		);
+
 		assertEqual(
 			menuItems(facts).map((item) => item.action),
-			["change", "recompute", "recomputeAll", "apply", "rewriteFiles"],
+			["change", "recompute", "implicit", "implicit", "recomputeAll", "apply", "rewriteFiles"],
 			"menu actions from the session facts",
 		);
 		session.shutdown("quit");

@@ -24,7 +24,6 @@ import {
 	changeVariable,
 	contextStatusMark,
 	formatAge,
-	implicitLine,
 	menuRowSegments,
 	menuRowText,
 	menuItems,
@@ -211,8 +210,7 @@ async function chooseMenuItem(
 	}
 	const labels = items.map((item) => menuRowText(item));
 	// Implicit `model`/`level` are shown read-only here too: the menu title and
-	// the implicit row (spec: show without offering a change).
-	const title = `${menuTitle(session)}\n${implicitLine(session.currentView())}`;
+	const title = menuTitle(session);
 	const chosen = await ctx.ui.select(title, labels);
 	if (chosen === undefined) return undefined;
 	const index = labels.indexOf(chosen);
@@ -273,19 +271,15 @@ function renderMenu(
 	width: number,
 ): string[] {
 	const renderWidth = Math.max(1, width);
-	const view = session.currentView();
 	const stale = session.isStale();
 	const lines = [theme.fg("accent", "─".repeat(renderWidth))];
 	lines.push(truncateToWidth(theme.fg("accent", " template — session context"), renderWidth));
 	const statusColor: ThemeColor = stale === undefined ? "error" : stale ? "warning" : "success";
 	lines.push(truncateToWidth(theme.fg(statusColor, ` ${contextStatusMark(stale)}`), renderWidth));
-	lines.push(
-		truncateToWidth(theme.fg("dim", ` ${implicitLine(view)}`), renderWidth),
-	);
 	lines.push("");
 	items.forEach((item, row) => {
 		const pointer = row === index ? theme.fg("accent", "> ") : "  ";
-		const color: ThemeColor = item.action === "recompute" ? "muted" : "text";
+		const color: ThemeColor = item.action === "recompute" || item.action === "implicit" ? "muted" : "text";
 		const segments = menuRowSegments(item).map((segment) =>
 			segment.kind === "status"
 				? theme.fg(segment.changed ? "warning" : "success", variableStatusMark(segment.changed))
@@ -341,6 +335,10 @@ async function performMenuItem(
 			result.ok ? "info" : "warning",
 		);
 		return "done";
+	}
+	if (item.action === "implicit") {
+		ctx.ui.notify("pi-template: model and level change through pi's own controls — read-only here", "info");
+		return "cancelled";
 	}
 	const facts = item.facts;
 	if (facts === undefined) return "done";
@@ -411,7 +409,7 @@ function menuTitle(session: TemplateSession): string {
 
 /** Without UI: state and menu items as text, nothing changes. */
 function menuDigest(session: TemplateSession, items: readonly MenuItem[]): string {
-	const lines = [menuTitle(session), implicitLine(session.currentView())];
+	const lines = [menuTitle(session)];
 	for (const item of items) lines.push(`  ${menuRowText(item)}`);
 	lines.push("UI unavailable — nothing changed");
 	return lines.join("\n");

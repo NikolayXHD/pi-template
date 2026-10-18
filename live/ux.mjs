@@ -172,8 +172,8 @@ await command.handler("", runner.createCommandContext());
 const firstSelect = state.selects[0];
 check(firstSelect.title.includes("pi-template · ✓"), `menu title with status: ${firstSelect.title}`);
 check(
-	firstSelect.title.includes("model = fake/fake") && firstSelect.title.includes("(implicit, read-only)"),
-	`RPC menu: implicit read-only in the title: ${JSON.stringify(firstSelect.title)}`,
+	firstSelect.options.includes("model = fake/fake · ✓") && firstSelect.options.includes("level = off · ✓"),
+	`RPC menu: implicit rows with status: ${JSON.stringify(firstSelect.options)}`,
 );
 check(firstSelect.options.some((option) => option.startsWith("role = preflight")), "the menu has the role change row");
 check(firstSelect.options.some((option) => option.includes("branch = main") && option.includes("computed,")), `menu shows the computed age: ${JSON.stringify(firstSelect.options)}`);
@@ -210,7 +210,7 @@ const lines = state.component.render(90);
 const text = lines.join("\n");
 check(text.includes("template — session context"), "TUI menu: title");
 check(text.includes("✓"), "TUI menu: status");
-check(text.includes("model = fake/fake") && text.includes("level = off (implicit, read-only)"), "TUI menu: implicit read-only");
+check(text.includes("model = fake/fake · ✓") && text.includes("level = off · ✓"), "TUI menu: implicit rows with status");
 check(text.includes("role = develop") && text.includes("session override"), "TUI menu: override");
 check(/branch = main · computed, \d+ s — Enter: recompute · [✓!]/.test(text), "TUI menu: value age");
 check(text.includes("update current session context"), "TUI menu: apply button");
@@ -371,8 +371,8 @@ noopUi.notify = originalNotify;
 const digestMessage = digest.at(-1)?.message ?? "";
 check(digestMessage.includes("pi-template · !"), `digest: status: ${JSON.stringify(digestMessage)}`);
 check(
-	digestMessage.includes("model = fake/fake") && digestMessage.includes("(implicit, read-only)"),
-	"digest: implicit read-only",
+	digestMessage.includes("model = fake/fake · ✓") && digestMessage.includes("level = off · ✓"),
+	"digest: implicit rows with status",
 );
 check(
 	digestMessage.includes("note = hello") &&
