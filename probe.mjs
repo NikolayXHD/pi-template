@@ -2248,6 +2248,36 @@ scenario("when_read_bracket_lost_twice_then_warned", async () => {
 });
 
 /** Recompute by explicit commands and value ages. */
+/**
+ * A model change re-renders the current version under the new values: the
+ * context is stale even when the rendered text coincides (nothing in the
+ * files refers to the model).
+ */
+scenario("when_model_changed_then_context_stale", async () => {
+	await withTempTree(async ({ agentDir, projectDir, write }) => {
+		write("agent/template.json", JSON.stringify({ vars: { who: { initial: "world" } } }));
+		write("agent/AGENTS.md.template", "Hello {{who}}");
+		const session = new TemplateSession({
+			agentDir,
+			projectDir,
+			parseHeader: simpleHeaderParser,
+			env: {},
+			homeDir: EMPTY_HOME,
+			execute: noShell,
+			now: () => 1000,
+		});
+		const warnings = [];
+		await session.start(sessionHost(warnings), "startup");
+		assertEqual(session.isStale(), false, "a fresh session is not stale");
+		await session.onModelChanged(sessionHost(warnings, "deepseek/other", "max"));
+		assertEqual(session.currentView().model, "deepseek/other", "the view did not take the new model");
+		assertEqual(session.isStale(), true, "a model change with identical text did not mark the context stale");
+		await session.onModelChanged(sessionHost(warnings, "deepseek/other", "max"));
+		assertEqual(session.isStale(), true, "a repeated model event with no change dropped the staleness");
+		session.shutdown("quit");
+	});
+});
+
 scenario("when_session_recompute_then_values_and_ages", async () => {
 	await withTempTree(async ({ agentDir, projectDir, write }) => {
 		write(

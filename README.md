@@ -184,8 +184,9 @@ model depends on `model@`").
 
 The extension's only command opens the context management menu:
 
-- session context status as one glyph: `✓` applied, `!` a re-render is
-  waiting, `‼` no view built (a broken config);
+- session context status as one glyph on the menu title: `✓` applied,
+  `!` a re-render is waiting (a variable, a model or a level changed, or a
+  source was edited), `‼` no view built (a broken config);
 - rows of the variables: the value; for computed ones the value age and
   recompute on Enter; for overridden ones "session override"; the variable
   status as the last segment — a colored glyph: `✓` green (the value is in

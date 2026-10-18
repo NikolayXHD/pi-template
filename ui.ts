@@ -273,9 +273,13 @@ function renderMenu(
 	const renderWidth = Math.max(1, width);
 	const stale = session.isStale();
 	const lines = [theme.fg("accent", "─".repeat(renderWidth))];
-	lines.push(truncateToWidth(theme.fg("accent", " template — session context"), renderWidth));
 	const statusColor: ThemeColor = stale === undefined ? "error" : stale ? "warning" : "success";
-	lines.push(truncateToWidth(theme.fg(statusColor, ` ${contextStatusMark(stale)}`), renderWidth));
+	lines.push(
+		truncateToWidth(
+			`${theme.fg("accent", " template — session context")} ${theme.fg(statusColor, contextStatusMark(stale))}`,
+			renderWidth,
+		),
+	);
 	lines.push("");
 	items.forEach((item, row) => {
 		const pointer = row === index ? theme.fg("accent", "> ") : "  ";
