@@ -122,18 +122,36 @@ export function menuItems(facts: readonly VariableFacts[]): MenuItem[] {
 	return items;
 }
 
-/** Menu row label: value, markers and the available action. */
-export function menuItemLabel(item: MenuItem): string {
-	if (item.action === "recomputeAll") return "recompute all variables";
-	if (item.action === "apply") return "update current session context";
-	if (item.action === "rewriteFiles") return "rewrite files on disk";
+/** Menu row segment: row text or the status mark the UI colors on its own. */
+export type MenuRowSegment = { kind: "text"; text: string } | { kind: "status"; changed: boolean };
+
+/** Menu row: the name and value, the status mark, then the markers. */
+export function menuRowSegments(item: MenuItem): MenuRowSegment[] {
+	if (item.action === "recomputeAll") return [{ kind: "text", text: "recompute all variables" }];
+	if (item.action === "apply") return [{ kind: "text", text: "update current session context" }];
+	if (item.action === "rewriteFiles") return [{ kind: "text", text: "rewrite files on disk" }];
 	const fact = item.facts;
-	if (fact === undefined) return "";
+	if (fact === undefined) return [];
 	const value = fact.value === undefined || fact.value === "" ? "—" : fact.value;
-	const parts = [`${fact.name} = ${value}`, fact.changed ? "changed" : "current"];
-	if (fact.computed) parts.push(`computed, ${formatAge(fact.ageMs ?? 0)} — Enter: recompute`);
-	else if (fact.overridden) parts.push("session override");
-	return parts.join(" · ");
+	const segments: MenuRowSegment[] = [
+		{ kind: "text", text: `${fact.name} = ${value}` },
+		{ kind: "status", changed: fact.changed },
+	];
+	if (fact.computed) segments.push({ kind: "text", text: `computed, ${formatAge(fact.ageMs ?? 0)} — Enter: recompute` });
+	else if (fact.overridden) segments.push({ kind: "text", text: "session override" });
+	return segments;
+}
+
+/** Variable status glyph: `✓` applied, `!` changed without applying. */
+export function variableStatusMark(changed: boolean): string {
+	return changed ? "!" : "✓";
+}
+
+/** Menu row as plain text: labels, digest, tests. */
+export function menuRowText(item: MenuItem): string {
+	return menuRowSegments(item)
+		.map((segment) => (segment.kind === "status" ? variableStatusMark(segment.changed) : segment.text))
+		.join(" · ");
 }
 
 /** Computed value age, compact: seconds, minutes, hours, days. */

@@ -50,7 +50,8 @@ import {
 	changeVariable,
 	formatAge,
 	implicitLine,
-	menuItemLabel,
+	menuRowSegments,
+	variableStatusMark,
 	menuItems,
 	nextStatusVariable,
 	nextVariableValue,
@@ -2570,13 +2571,12 @@ scenario("when_menu_selected_then_computed_and_implicit_excluded", async () => {
 		"menu composition",
 	);
 	assertEqual(items.some((item) => item.facts?.name === "model" || item.facts?.name === "level"), false, "implicit variable got into the menu");
-	assertEqual(menuItemLabel(items[0]).includes("changed"), true, "unapplied value label");
-	assertEqual(menuItemLabel(items[0]).includes("session override"), true, "override label");
-	assertEqual(menuItemLabel(items[1]).includes("current"), true, "applied value label");
-	assertEqual(menuItemLabel(items[1]).includes("computed, 3 s"), true, "computed age label");
-	assertEqual(menuItemLabel(items[2]), "recompute all variables", "recompute-all label");
-	assertEqual(menuItemLabel(items[3]), "update current session context", "apply label");
-	assertEqual(menuItemLabel(items[4]), "rewrite files on disk", "rewrite-files label");
+	const rowText = (item) => menuRowSegments(item).map((segment) => (segment.kind === "status" ? variableStatusMark(segment.changed) : segment.text)).join(" · ");
+	assertEqual(rowText(items[0]), "role = develop · ! · session override", "unapplied variable row");
+	assertEqual(rowText(items[1]), "branch = main · ✓ · computed, 3 s — Enter: recompute", "applied computed row");
+	assertEqual(rowText(items[2]), "recompute all variables", "recompute-all row");
+	assertEqual(rowText(items[3]), "update current session context", "apply row");
+	assertEqual(rowText(items[4]), "rewrite files on disk", "rewrite-files row");
 	assertEqual(
 		items.filter((item) => item.action === "apply" || item.action === "rewriteFiles").map((item) => item.action),
 		["apply", "rewriteFiles"],

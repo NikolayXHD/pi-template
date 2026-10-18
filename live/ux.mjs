@@ -212,7 +212,7 @@ check(text.includes("template — session context"), "TUI menu: title");
 check(text.includes("✓"), "TUI menu: status");
 check(text.includes("model = fake/fake") && text.includes("level = off (implicit, read-only)"), "TUI menu: implicit read-only");
 check(text.includes("role = develop") && text.includes("session override"), "TUI menu: override");
-check(/branch = main · (current|changed) · computed, \d+ s/.test(text), "TUI menu: value age");
+check(/branch = main · [✓!] · computed, \d+ s/.test(text), "TUI menu: value age");
 check(text.includes("update current session context"), "TUI menu: apply button");
 check(text.includes("rewrite files on disk"), "TUI menu: rewrite files item");
 state.component.handleInput("\x1b[B");

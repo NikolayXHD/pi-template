@@ -25,8 +25,10 @@ import {
 	contextStatusMark,
 	formatAge,
 	implicitLine,
-	menuItemLabel,
+	menuRowSegments,
+	menuRowText,
 	menuItems,
+	variableStatusMark,
 	nextStatusVariable,
 	nextVariableValue,
 	statusLineText,
@@ -207,7 +209,7 @@ async function chooseMenuItem(
 		ctx.ui.notify(menuDigest(session, items), "info");
 		return undefined;
 	}
-	const labels = items.map(menuItemLabel);
+	const labels = items.map((item) => menuRowText(item));
 	// Implicit `model`/`level` are shown read-only here too: the menu title and
 	// the implicit row (spec: show without offering a change).
 	const title = `${menuTitle(session)}\n${implicitLine(session.currentView())}`;
@@ -284,7 +286,12 @@ function renderMenu(
 	items.forEach((item, row) => {
 		const pointer = row === index ? theme.fg("accent", "> ") : "  ";
 		const color: ThemeColor = item.action === "recompute" ? "muted" : "text";
-		lines.push(truncateToWidth(`${pointer}${theme.fg(color, menuItemLabel(item))}`, renderWidth));
+		const segments = menuRowSegments(item).map((segment) =>
+			segment.kind === "status"
+				? theme.fg(segment.changed ? "warning" : "success", variableStatusMark(segment.changed))
+				: segment.text,
+		);
+		lines.push(truncateToWidth(`${pointer}${theme.fg(color, segments.join(" · "))}`, renderWidth));
 	});
 	lines.push("");
 	lines.push(
@@ -405,7 +412,7 @@ function menuTitle(session: TemplateSession): string {
 /** Without UI: state and menu items as text, nothing changes. */
 function menuDigest(session: TemplateSession, items: readonly MenuItem[]): string {
 	const lines = [menuTitle(session), implicitLine(session.currentView())];
-	for (const item of items) lines.push(`  ${menuItemLabel(item)}`);
+	for (const item of items) lines.push(`  ${menuRowText(item)}`);
 	lines.push("UI unavailable — nothing changed");
 	return lines.join("\n");
 }
