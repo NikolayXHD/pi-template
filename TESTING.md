@@ -74,6 +74,9 @@ hand below.
 - **Status line**: one state glyph (`template ✓` / `template !` /
   `template ‼` with a broken config) and, when `statusVariable` is set, the
   pair of that variable (`template ! role=develop`).
+- **Menu rows**: a variable row shows the variable status — `current` (the
+  value is in the applied context) or `changed` (it differs: an override,
+  a recompute or a source edit happened without applying).
 - **Session file** (`PI_SESSION_FILE`): a variable change gives a
   `customType: "var"` record with `data` of the form `{name, value}`; there
   are no new-format role records (`"role"` is the old format and is

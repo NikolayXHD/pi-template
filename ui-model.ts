@@ -45,6 +45,7 @@ export function readVarOverrides(entries: readonly unknown[]): Record<string, st
 /** Menu data source — `TemplateSession` methods (structural type). */
 export interface MenuSession {
 	currentView(): Record<string, string>;
+	appliedView(): Record<string, string>;
 	currentValues(): Record<string, string[] | undefined>;
 	computedAge(name: string): number | undefined;
 }
@@ -65,6 +66,8 @@ export interface VariableFacts {
 	overridden: boolean;
 	/** Implicit variable (`model`/`level`). */
 	implicit: boolean;
+	/** The value differs from the applied context: the variable changed without applying. */
+	changed: boolean;
 }
 
 /**
@@ -74,6 +77,7 @@ export interface VariableFacts {
  */
 export function variableFacts(session: MenuSession, overrides: Readonly<Record<string, string>>): VariableFacts[] {
 	const view = session.currentView();
+	const applied = session.appliedView();
 	const values = session.currentValues();
 	return Object.keys(values).map((name) => {
 		const ageMs = session.computedAge(name);
@@ -87,6 +91,7 @@ export function variableFacts(session: MenuSession, overrides: Readonly<Record<s
 			ageMs,
 			overridden: !computed && !implicit && Object.hasOwn(overrides, name),
 			implicit,
+			changed: applied[name] !== view[name],
 		};
 	});
 }
@@ -125,7 +130,7 @@ export function menuItemLabel(item: MenuItem): string {
 	const fact = item.facts;
 	if (fact === undefined) return "";
 	const value = fact.value === undefined || fact.value === "" ? "—" : fact.value;
-	const parts = [`${fact.name} = ${value}`];
+	const parts = [`${fact.name} = ${value}`, fact.changed ? "changed" : "current"];
 	if (fact.computed) parts.push(`computed, ${formatAge(fact.ageMs ?? 0)} — Enter: recompute`);
 	else if (fact.overridden) parts.push("session override");
 	return parts.join(" · ");

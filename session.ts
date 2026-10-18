@@ -165,7 +165,7 @@ export class TemplateSession {
 	private childViews = new Map<string, ChildView>();
 
 	private readonly versions = new ContextVersions();
-	private appliedView: Record<string, string> = {};
+	private applied: Record<string, string> = {};
 	private pendingDelivery = false;
 	private readonly brackets = new Set<TargetBracket>();
 
@@ -325,13 +325,13 @@ export class TemplateSession {
 			// pi has already re-read the target files; delivery is not needed, the
 			// current version exists for status and future applies.
 			this.versions.setApplied({ texts: { ...this.startupTexts }, view: { ...this.view } });
-			this.appliedView = { ...this.view };
+			this.applied = { ...this.view };
 			this.pendingDelivery = false;
 			return;
 		}
 		if (current === null) return;
 		this.versions.applyCurrent();
-		this.appliedView = { ...this.view };
+		this.applied = { ...this.view };
 		this.pendingDelivery = true;
 		this.writeVersion(current);
 	}
@@ -428,7 +428,7 @@ export class TemplateSession {
 					await this.buildView(host);
 					this.versions.applyCurrent();
 					const current = this.versions.current;
-					this.appliedView = { ...this.view };
+					this.applied = { ...this.view };
 					this.pendingDelivery = true;
 					if (current !== null) this.writeVersion(current);
 				}
@@ -441,7 +441,7 @@ export class TemplateSession {
 			const corrected = await this.checkActualModel(host);
 			if (corrected) {
 				this.versions.applyCurrent();
-				this.appliedView = { ...this.view };
+				this.applied = { ...this.view };
 			}
 			const applied = this.versions.applied;
 			if (applied !== null) this.writeVersion(applied);
@@ -822,7 +822,7 @@ export class TemplateSession {
 				seen.add(source.target);
 				planned.push({
 					source,
-					preliminary: { model: this.appliedView.model ?? "", level: this.appliedView.level ?? "" },
+					preliminary: { model: this.applied.model ?? "", level: this.applied.level ?? "" },
 				});
 			}
 		}
@@ -870,8 +870,8 @@ export class TemplateSession {
 	 * no parameter — the applied session values.
 	 */
 	private spawnPreliminary(model: string | undefined): AgentFilePreliminary {
-		const fallbackModel = this.appliedView.model ?? "";
-		const fallbackLevel = this.appliedView.level ?? "";
+		const fallbackModel = this.applied.model ?? "";
+		const fallbackLevel = this.applied.level ?? "";
 		if (model === undefined || model === "") {
 			return { model: fallbackModel, level: fallbackLevel };
 		}
@@ -890,16 +890,16 @@ export class TemplateSession {
 		preliminary?: AgentFilePreliminary,
 	): Promise<string | undefined> {
 		const values: AgentFilePreliminary = preliminary ?? {
-			model: this.appliedView.model ?? "",
-			level: this.appliedView.level ?? "",
+			model: this.applied.model ?? "",
+			level: this.applied.level ?? "",
 		};
 		try {
 			return await renderSource(source, {
-				view: this.appliedView,
+				view: this.applied,
 				variables: this.values,
 				partials: createPartialResolver(this.agentDir, this.projectDir),
 				parseHeader: this.parseHeader,
-				subagentView: (name) => this.childRenderView(name, values, this.appliedView),
+				subagentView: (name) => this.childRenderView(name, values, this.applied),
 			});
 		} catch (error) {
 			this.warn(`${source.source}: ${errorMessage(error)}`);
@@ -935,6 +935,11 @@ export class TemplateSession {
 		return { ...this.view };
 	}
 
+	/** Values of the applied context — the per-variable status reference. */
+	appliedView(): Record<string, string> {
+		return { ...this.applied };
+	}
+
 	currentValues(): Record<string, string[] | undefined> {
 		return { ...this.values };
 	}
@@ -962,7 +967,7 @@ export class TemplateSession {
 		const current = this.versions.current;
 		if (!this.started || current === null) return false;
 		this.versions.applyCurrent();
-		this.appliedView = { ...this.view };
+		this.applied = { ...this.view };
 		this.pendingDelivery = true;
 		this.writeVersion(current);
 		return true;

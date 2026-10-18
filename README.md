@@ -187,7 +187,9 @@ The extension's only command opens the context management menu:
 - session context status as one glyph: `✓` applied, `!` a re-render is
   waiting, `‼` no view built (a broken config);
 - implicit `model`/`level` as a read-only row;
-- rows of declared variables: the value; for computed ones the value age and
+- rows of declared variables: the value; the variable status — `current`
+  (the value is in the applied context) or `changed` (it differs — the
+  context has not been applied since); for computed ones the value age and
   recompute on Enter; for overridden ones "session override" and a value
   change;
 - "recompute all variables";

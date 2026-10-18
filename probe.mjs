@@ -2541,6 +2541,7 @@ scenario("when_menu_selected_then_computed_and_implicit_excluded", async () => {
 	// offered" guarantee is their absence from the facts.
 	const session = {
 		currentView: () => ({ model: "deepseek/flash", level: "max", role: "develop", branch: "main" }),
+		appliedView: () => ({ model: "deepseek/flash", level: "max", role: "preflight", branch: "main" }),
 		currentValues: () => ({ role: ["preflight", "develop"], branch: undefined }),
 		computedAge: (name) => (name === "branch" ? 3200 : undefined),
 	};
@@ -2552,7 +2553,9 @@ scenario("when_menu_selected_then_computed_and_implicit_excluded", async () => {
 		"implicit variables got into the facts",
 	);
 	assertEqual(facts[0].overridden, true, "session override not marked");
+	assertEqual(facts[0].changed, true, "unapplied override not marked changed");
 	assertEqual(facts[1].computed, true, "computed variable not marked");
+	assertEqual(facts[1].changed, false, "value matching the applied context not marked current");
 	assertEqual(facts[1].ageMs, 3200, "computed value age not passed through");
 	const items = menuItems(facts);
 	assertEqual(
@@ -2567,7 +2570,9 @@ scenario("when_menu_selected_then_computed_and_implicit_excluded", async () => {
 		"menu composition",
 	);
 	assertEqual(items.some((item) => item.facts?.name === "model" || item.facts?.name === "level"), false, "implicit variable got into the menu");
+	assertEqual(menuItemLabel(items[0]).includes("changed"), true, "unapplied value label");
 	assertEqual(menuItemLabel(items[0]).includes("session override"), true, "override label");
+	assertEqual(menuItemLabel(items[1]).includes("current"), true, "applied value label");
 	assertEqual(menuItemLabel(items[1]).includes("computed, 3 s"), true, "computed age label");
 	assertEqual(menuItemLabel(items[2]), "recompute all variables", "recompute-all label");
 	assertEqual(menuItemLabel(items[3]), "update current session context", "apply label");

@@ -33,7 +33,10 @@ function makeUi(mode) {
 		select: async (title, options) => {
 			state.selects.push({ title, options });
 			const next = state.script.shift();
-			return typeof next === "string" && options.includes(next) ? next : undefined;
+			if (typeof next !== "string") return undefined;
+			if (options.includes(next)) return next;
+			const matched = options.find((option) => option.startsWith(`${next} ·`));
+			return matched;
 		},
 		confirm: async () => false,
 		input: async (title, placeholder) => {
@@ -172,7 +175,7 @@ check(
 	firstSelect.title.includes("model = fake/fake") && firstSelect.title.includes("(implicit, read-only)"),
 	`RPC menu: implicit read-only in the title: ${JSON.stringify(firstSelect.title)}`,
 );
-check(firstSelect.options.includes("role = preflight"), "the menu has the role change row");
+check(firstSelect.options.some((option) => option.startsWith("role = preflight")), "the menu has the role change row");
 check(firstSelect.options.some((option) => option.includes("branch = main") && option.includes("computed,")), `menu shows the computed age: ${JSON.stringify(firstSelect.options)}`);
 check(firstSelect.options.some((option) => option.includes("home = ") && option.includes("computed,")), `env variable with age: ${JSON.stringify(firstSelect.options)}`);
 check(firstSelect.options.includes("recompute all variables"), "the menu has recompute all");
@@ -209,7 +212,7 @@ check(text.includes("template — session context"), "TUI menu: title");
 check(text.includes("✓"), "TUI menu: status");
 check(text.includes("model = fake/fake") && text.includes("level = off (implicit, read-only)"), "TUI menu: implicit read-only");
 check(text.includes("role = develop") && text.includes("session override"), "TUI menu: override");
-check(/branch = main · computed, \d+ s/.test(text), "TUI menu: value age");
+check(/branch = main · (current|changed) · computed, \d+ s/.test(text), "TUI menu: value age");
 check(text.includes("update current session context"), "TUI menu: apply button");
 check(text.includes("rewrite files on disk"), "TUI menu: rewrite files item");
 state.component.handleInput("\x1b[B");
@@ -338,7 +341,7 @@ check(inputStatus === "template !", `status after line input: ${inputStatus}`);
 
 // Esc in the RPC value dialog also returns to the menu.
 const rpcSelectsBefore = inputUi.state.selects.length;
-inputUi.state.script.push("note = hello · session override"); // no value — Esc in the input dialog
+inputUi.state.script.push("note = hello"); // no value — Esc in the input dialog
 await inputCommand.handler("", inputRunner.createCommandContext());
 check(
 	inputUi.state.selects.length === rpcSelectsBefore + 2 &&
