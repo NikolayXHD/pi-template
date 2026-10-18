@@ -125,7 +125,7 @@ export function menuItems(facts: readonly VariableFacts[]): MenuItem[] {
 /** Menu row segment: row text or the status mark the UI colors on its own. */
 export type MenuRowSegment = { kind: "text"; text: string } | { kind: "status"; changed: boolean };
 
-/** Menu row: the name and value, the status mark, then the markers. */
+/** Menu row: the name and value, the markers, then the status mark. */
 export function menuRowSegments(item: MenuItem): MenuRowSegment[] {
 	if (item.action === "recomputeAll") return [{ kind: "text", text: "recompute all variables" }];
 	if (item.action === "apply") return [{ kind: "text", text: "update current session context" }];
@@ -133,12 +133,10 @@ export function menuRowSegments(item: MenuItem): MenuRowSegment[] {
 	const fact = item.facts;
 	if (fact === undefined) return [];
 	const value = fact.value === undefined || fact.value === "" ? "—" : fact.value;
-	const segments: MenuRowSegment[] = [
-		{ kind: "text", text: `${fact.name} = ${value}` },
-		{ kind: "status", changed: fact.changed },
-	];
+	const segments: MenuRowSegment[] = [{ kind: "text", text: `${fact.name} = ${value}` }];
 	if (fact.computed) segments.push({ kind: "text", text: `computed, ${formatAge(fact.ageMs ?? 0)} — Enter: recompute` });
 	else if (fact.overridden) segments.push({ kind: "text", text: "session override" });
+	segments.push({ kind: "status", changed: fact.changed });
 	return segments;
 }
 

@@ -2572,8 +2572,8 @@ scenario("when_menu_selected_then_computed_and_implicit_excluded", async () => {
 	);
 	assertEqual(items.some((item) => item.facts?.name === "model" || item.facts?.name === "level"), false, "implicit variable got into the menu");
 	const rowText = (item) => menuRowSegments(item).map((segment) => (segment.kind === "status" ? variableStatusMark(segment.changed) : segment.text)).join(" · ");
-	assertEqual(rowText(items[0]), "role = develop · ! · session override", "unapplied variable row");
-	assertEqual(rowText(items[1]), "branch = main · ✓ · computed, 3 s — Enter: recompute", "applied computed row");
+	assertEqual(rowText(items[0]), "role = develop · session override · !", "unapplied variable row");
+	assertEqual(rowText(items[1]), "branch = main · computed, 3 s — Enter: recompute · ✓", "applied computed row");
 	assertEqual(rowText(items[2]), "recompute all variables", "recompute-all row");
 	assertEqual(rowText(items[3]), "update current session context", "apply row");
 	assertEqual(rowText(items[4]), "rewrite files on disk", "rewrite-files row");
