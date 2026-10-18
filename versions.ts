@@ -75,16 +75,16 @@ export class ContextVersions {
 		this.appliedVersion = this.currentVersion;
 	}
 
-	/**
-	 * Version mismatch — "prompts are stale". The texts and the view: a model or
-	 * level change re-renders the current version under the new values, and the
-	 * context is stale even when the texts happen to coincide.
+/**
+	 * Version mismatch — "prompts are stale". The comparison is by texts: a
+	 * changed variable (a model, a level, an override) with the same render
+	 * leaves the context fresh — the prompt already equals a fresh render; the
+	 * per-variable rows show which inputs changed.
 	 */
 	stale(): boolean {
 		if (this.appliedVersion === null || this.currentVersion === null) {
 			return this.appliedVersion !== this.currentVersion;
 		}
-		if (canonicalJson(this.appliedVersion.texts) !== canonicalJson(this.currentVersion.texts)) return true;
-		return canonicalJson(this.appliedVersion.view) !== canonicalJson(this.currentVersion.view);
+		return canonicalJson(this.appliedVersion.texts) !== canonicalJson(this.currentVersion.texts);
 	}
 }

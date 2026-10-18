@@ -2249,11 +2249,12 @@ scenario("when_read_bracket_lost_twice_then_warned", async () => {
 
 /** Recompute by explicit commands and value ages. */
 /**
- * A model change re-renders the current version under the new values: the
- * context is stale even when the rendered text coincides (nothing in the
- * files refers to the model).
+ * A model change re-renders the current version under the new values. The
+ * context is compared by texts: with the same render the prompt already
+ * equals a fresh render, the context is fresh — the per-variable rows show
+ * which inputs changed.
  */
-scenario("when_model_changed_then_context_stale", async () => {
+scenario("when_model_changed_then_context_fresh_by_text", async () => {
 	await withTempTree(async ({ agentDir, projectDir, write }) => {
 		write("agent/template.json", JSON.stringify({ vars: { who: { initial: "world" } } }));
 		write("agent/AGENTS.md.template", "Hello {{who}}");
@@ -2271,9 +2272,9 @@ scenario("when_model_changed_then_context_stale", async () => {
 		assertEqual(session.isStale(), false, "a fresh session is not stale");
 		await session.onModelChanged(sessionHost(warnings, "deepseek/other", "max"));
 		assertEqual(session.currentView().model, "deepseek/other", "the view did not take the new model");
-		assertEqual(session.isStale(), true, "a model change with identical text did not mark the context stale");
+		assertEqual(session.isStale(), false, "a model change with identical text marked the context stale");
 		await session.onModelChanged(sessionHost(warnings, "deepseek/other", "max"));
-		assertEqual(session.isStale(), true, "a repeated model event with no change dropped the staleness");
+		assertEqual(session.isStale(), false, "a repeated model event marked the context stale");
 		session.shutdown("quit");
 	});
 });
