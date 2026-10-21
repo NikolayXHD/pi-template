@@ -120,6 +120,14 @@ async function makeEnvironment(root, entries) {
 				contextWindow: 1000,
 				maxTokens: 100,
 			},
+			{
+				id: "flash",
+				name: "Fake Flash",
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 1000,
+				maxTokens: 100,
+			},
 		],
 	});
 	const model = modelRuntime.getModel("fake", "fake");
@@ -457,7 +465,7 @@ check(reloadCalls === 0, `rewrite called reload ${reloadCalls} times`);
 check(rewriteStatus() === "template ! role=develop", `status after the rewrite: ${rewriteStatus()}`);
 check(rewriteVarEntries() === varEntriesBeforeRewrite, "rewrite wrote a session record");
 check(promptTemplate()?.content === "Hello preflight", `rewrite does not re-read the loader: ${JSON.stringify(promptTemplate()?.content)}`);
-check(rewriteUi.state.notifications.at(-1)?.message === "pi-template: targets rewritten", `rewrite message: ${JSON.stringify(rewriteUi.state.notifications.at(-1))}`);
+check(rewriteUi.state.notifications.at(-1)?.message?.startsWith("pi-template: targets rewritten"), `rewrite message: ${JSON.stringify(rewriteUi.state.notifications.at(-1))}`);
 
 // The session keeps working on the applied version: delivery returns the previous text.
 const rewriteOptions = { contextFiles: [{ path: agentsTarget, content: readFileSync(agentsTarget, "utf-8") }] };
@@ -578,7 +586,7 @@ for (let step = 0; step < rewriteItem; step += 1) stayUi.state.customs[0].handle
 stayUi.state.customs[0].handleInput("\r");
 await waitFor(() => stayUi.state.customs.length === 2, "the menu did not re-open after the button");
 check(
-	stayUi.state.notifications.some((notice) => notice.message === "pi-template: targets rewritten"),
+	stayUi.state.notifications.some((notice) => notice.message.startsWith("pi-template: targets")),
 	`button message: ${JSON.stringify(stayUi.state.notifications)}`,
 );
 check(
@@ -592,6 +600,101 @@ await stayRun;
 check(stayUi.state.customs.length === 2, "a new dialog after Esc");
 staySession.session.dispose();
 rmSync(stayRoot, { recursive: true, force: true });
+
+// ——— Model switch: is_flash targets follow the model ———
+const followRoot = mkdtempSync(join(tmpdir(), "pi-template-follow-"));
+process.env.PI_CODING_AGENT_DIR = join(followRoot, "agent");
+const followEnv = await makeEnvironment(followRoot);
+writeFileSync(
+	join(followEnv.agentDir, "template.json"),
+	JSON.stringify({ vars: { is_flash: { compute: 'in model "fake/flash"' } } }),
+);
+writeFileSync(join(followEnv.projectDir, "AGENTS.md.template"), "head\n{{#if is_flash}}FLASH RULES{{/if}}\ntail");
+const followUi = makeUi("rpc");
+const followSession = await pi.createAgentSession({
+	cwd: followEnv.projectDir,
+	agentDir: followEnv.agentDir,
+	modelRuntime: followEnv.modelRuntime,
+	model: followEnv.model,
+	thinkingLevel: "low",
+	resourceLoader: followEnv.loader,
+	sessionManager: followEnv.sessionManager,
+	settingsManager: followEnv.settingsManager,
+});
+await followSession.session.bindExtensions({ uiContext: followUi.ui, mode: "rpc" });
+const followRunner = followSession.session.extensionRunner;
+const followCommand = followRunner.getCommand("template");
+const followTarget = join(followEnv.projectDir, "AGENTS.md");
+const rewriteFollow = async () => {
+	followUi.state.script.push("rewrite files on disk");
+	await followCommand.handler("", followRunner.createCommandContext());
+};
+
+check(readFileSync(followTarget, "utf-8") === "head\n\ntail", `startup target: ${JSON.stringify(readFileSync(followTarget, "utf-8"))}`);
+
+// Real model switch (the same path as /model): the flash model is selected.
+const flashModel = followEnv.modelRuntime.getModel("fake", "flash");
+if (!flashModel) throw new Error("flash test model not created");
+await followSession.session.setModel(flashModel);
+await rewriteFollow();
+check(
+	readFileSync(followTarget, "utf-8") === "head\nFLASH RULES\ntail",
+	`flash rules not in the target after the model switch: ${JSON.stringify(readFileSync(followTarget, "utf-8"))}`,
+);
+
+// And back: the flash rules leave the target.
+await followSession.session.setModel(followEnv.model);
+await rewriteFollow();
+check(
+	readFileSync(followTarget, "utf-8") === "head\n\ntail",
+	`flash rules stayed in the target after the switch back: ${JSON.stringify(readFileSync(followTarget, "utf-8"))}`,
+);
+followSession.session.dispose();
+rmSync(followRoot, { recursive: true, force: true });
+
+// ——— Config edit mid-session: is_flash appears without a restart ———
+const editRoot = mkdtempSync(join(tmpdir(), "pi-template-edit-"));
+process.env.PI_CODING_AGENT_DIR = join(editRoot, "agent");
+const editEnv = await makeEnvironment(editRoot);
+// The session starts with a config that has no `is_flash` and a template that
+// references it: the render fails and the target keeps the previous text.
+writeFileSync(join(editEnv.agentDir, "template.json"), JSON.stringify({ vars: {} }));
+writeFileSync(join(editEnv.projectDir, "AGENTS.md.template"), "head\n{{#if is_flash}}FLASH RULES{{/if}}\ntail");
+writeFileSync(join(editEnv.projectDir, "AGENTS.md"), "previous text");
+const editUi = makeUi("rpc");
+const editSession = await pi.createAgentSession({
+	cwd: editEnv.projectDir,
+	agentDir: editEnv.agentDir,
+	modelRuntime: editEnv.modelRuntime,
+	model: editEnv.model,
+	thinkingLevel: "low",
+	resourceLoader: editEnv.loader,
+	sessionManager: editEnv.sessionManager,
+	settingsManager: editEnv.settingsManager,
+});
+await editSession.session.bindExtensions({ uiContext: editUi.ui, mode: "rpc" });
+const editRunner = editSession.session.extensionRunner;
+const editCommand = editRunner.getCommand("template");
+const editTarget = join(editEnv.projectDir, "AGENTS.md");
+check(readFileSync(editTarget, "utf-8") === "previous text", `startup kept the target: ${JSON.stringify(readFileSync(editTarget, "utf-8"))}`);
+
+// The config gains the variable mid-session (the file is edited by hand).
+writeFileSync(
+	join(editEnv.agentDir, "template.json"),
+	JSON.stringify({ vars: { is_flash: { compute: 'in model "fake/fake"' } } }),
+);
+editUi.state.script.push("rewrite files on disk");
+await editCommand.handler("", editRunner.createCommandContext());
+check(
+	readFileSync(editTarget, "utf-8") === "head\nFLASH RULES\ntail",
+	`the new variable did not reach the target: ${JSON.stringify(readFileSync(editTarget, "utf-8"))}`,
+);
+check(
+	editUi.state.notifications.some((notice) => notice.message === "pi-template: targets rewritten — 1 file(s)"),
+	`rewrite message: ${JSON.stringify(editUi.state.notifications)}`,
+);
+editSession.session.dispose();
+rmSync(editRoot, { recursive: true, force: true });
 
 // ——— Broken template.json: a clear message, no crash ———
 const brokenRoot = mkdtempSync(join(tmpdir(), "pi-template-broken-"));

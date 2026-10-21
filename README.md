@@ -214,7 +214,8 @@ The extension's only command opens the context management menu:
   level), so their status matters like any other's;
 - "recompute all variables";
 - "rewrite files on disk" — writing the current version into the targets
-  without applying it;
+  without applying it; the notification says how many files changed, that
+  nothing changed, or which files failed to render;
 - "update current session context" — applying the current version.
 
 The file buttons follow the workflow: rewrite first, read the files if you
@@ -256,7 +257,9 @@ The extension keeps two versions of the context files in memory: the
 - Sources and the files of the last render's includes are compared by
   `mtime`+`size` on every turn; shell computations run only by explicit
   menu actions, `compute` expressions are re-derived on every view change
-  (model/level, overrides).
+  (model/level, overrides). A `template.json` edit is picked up the same way
+  — the config is re-read and the view rebuilt on the next turn or menu
+  open; a broken file keeps the previous config with a warning.
 
 ## Subagents
 

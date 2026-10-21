@@ -179,6 +179,8 @@ async function runMenuUntilExit(
 ): Promise<void> {
 	let cursor = 0;
 	for (;;) {
+		// A `template.json` edit between actions is picked up like a source edit.
+		await session.refreshConfig();
 		const items = menuItems(variableFacts(session, overrides));
 		const choice = await chooseMenuItem(ctx, session, items, cursor);
 		if (choice === undefined) return; // Esc in the menu root — close
@@ -310,10 +312,22 @@ async function performMenuItem(
 	if (item.action === "rewriteFiles") {
 		// The button rewrites files only: apply and reload are not its business;
 		// versions, applied context and session records are not touched.
-		if (session.rewriteFiles()) {
-			ctx.ui.notify("pi-template: targets rewritten", "info");
-		} else {
+		const report = session.rewriteFiles();
+		if (!report.ok) {
 			ctx.ui.notify("pi-template: nothing to rewrite", "warning");
+			return;
+		}
+		ctx.ui.notify(
+			report.changed > 0
+				? `pi-template: targets rewritten — ${report.changed} file(s)`
+				: "pi-template: targets are current — nothing to change",
+			"info",
+		);
+		if (report.problems.length > 0) {
+			ctx.ui.notify(
+				`pi-template: ${report.problems.length} file(s) failed to render — ${report.problems[0]}`,
+				"warning",
+			);
 		}
 		return;
 	}

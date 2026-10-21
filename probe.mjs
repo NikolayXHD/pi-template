@@ -2823,6 +2823,37 @@ scenario("when_child_view_computed_then_derived_follows_child_model", async () =
 	assertEqual(view.child_flash, "false", "re-derivation ignored the model");
 });
 
+/** `template.json` is an input: an edit is picked up without a restart. */
+scenario("when_config_changes_then_view_rebuilt_on_refresh", async () => {
+	await withTempTree(async ({ agentDir, projectDir, write }) => {
+		write("agent/template.json", JSON.stringify({ vars: { who: { initial: "world" } } }));
+		write("agent/AGENTS.md.template", "Hello {{who}}{{#if is_flash}} FLASH{{/if}}");
+		const session = makeSession({ agentDir, projectDir });
+		const warnings = [];
+		await session.start(sessionHost(warnings), "startup");
+		assertEqual(session.currentView().is_flash, undefined, "a variable appeared without the config");
+
+		// The config gains a variable mid-session: the view follows without a restart.
+		write(
+			"agent/template.json",
+			JSON.stringify({ vars: { who: { initial: "world" }, is_flash: { compute: 'in model "deepseek/flash"' } } }),
+		);
+		await session.beforeAgentStart({ systemPromptOptions: {} }, sessionHost(warnings));
+		assertEqual(session.currentView().is_flash, "true", "the new variable is not in the view");
+		assertEqual(session.rewriteFiles().changed, 1, "the target did not re-render with the new variable");
+
+		// A broken config keeps the previous one with a warning.
+		write("agent/template.json", "{");
+		await session.beforeAgentStart({ systemPromptOptions: {} }, sessionHost(warnings));
+		assertEqual(session.currentView().is_flash, "true", "a broken config dropped the view");
+		assert(
+			warnings.some((message) => message.includes("keeping the previous config")),
+			`no warning about the broken config: ${JSON.stringify(warnings)}`,
+		);
+		session.shutdown("quit");
+	});
+});
+
 /** A project skill is added only with trust. */
 scenario("when_project_skill_trust_then_added", async () => {
 	await withTempTree(async ({ agentDir, projectDir, write }) => {
@@ -3125,7 +3156,7 @@ scenario("when_rewrite_files_then_targets_fresh_versions_untouched", async () =>
 		const agentTarget = join(agentDir, "agents", "foo.md");
 		const warnings = [];
 		const session = makeSession({ agentDir, projectDir });
-		assertEqual(session.rewriteFiles(), false, "rewrite before start did not fail");
+		assertEqual(session.rewriteFiles().ok, false, "rewrite before start did not fail");
 		await session.start(sessionHost(warnings), "startup");
 		// The first turn closes the startup delivery: after that the session runs as usual.
 		await session.beforeAgentStart({ systemPromptOptions: {} }, sessionHost(warnings));
@@ -3138,7 +3169,9 @@ scenario("when_rewrite_files_then_targets_fresh_versions_untouched", async () =>
 		assertEqual(session.isStale(), true, "variable change did not mark the context stale");
 
 		// Rewrite files: the target gets the current version, the applied one does not change.
-		assertEqual(session.rewriteFiles(), true, "rewrite files failed");
+		const first = session.rewriteFiles();
+		assertEqual(first.ok, true, "rewrite files failed");
+		assertEqual(first.changed, 2, "the report does not count the rewritten files");
 		assertEqual(readFileSync(target, "utf-8"), "Hello sun", "target file not re-rendered");
 		assert(readFileSync(agentTarget, "utf-8").includes("Agent sun"), "agent target file not re-rendered");
 		assertEqual(session.isStale(), true, "rewrite aligned the versions");
@@ -3152,7 +3185,9 @@ scenario("when_rewrite_files_then_targets_fresh_versions_untouched", async () =>
 		// The apply button aligns versions; a repeated rewrite is safe.
 		assertEqual(session.apply(), true, "apply failed");
 		assertEqual(session.isStale(), false, "apply did not align versions");
-		assertEqual(session.rewriteFiles(), true, "repeated rewrite failed");
+		const repeated = session.rewriteFiles();
+		assertEqual(repeated.ok, true, "repeated rewrite failed");
+		assertEqual(repeated.changed, 0, "a repeated rewrite rewrote files again");
 		assertEqual(readFileSync(target, "utf-8"), "Hello sun", "repeated rewrite corrupted the target file");
 		session.shutdown("quit");
 	});

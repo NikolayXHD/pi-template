@@ -27,10 +27,12 @@ the end. Coverage:
   (including the files of the last render's includes), set render with file
   failures, subagent identity, session lifecycle
   (start apply, delivery by replacement and addition, `/reload`, read and
-  spawn brackets, recompute, derived variables following the model);
+  spawn brackets, recompute, derived variables following the model, a
+  `template.json` edit picked up mid-session);
 - **UX**: `"var"` records (strict payload, `"role"` ignored), menu
-  composition, computed ages, derived variable rows, the status line, the
-  `statusVariable` field and the quick-switch rings (`ctrl+r`/`alt+r`).
+  composition, computed ages, derived variable rows, the menu staying open
+  after an action, the rewrite report, the status line, the `statusVariable`
+  field and the quick-switch rings (`ctrl+r`/`alt+r`).
 
 ## Live runs
 

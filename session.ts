@@ -163,6 +163,10 @@ export class TemplateSession {
 	/** Files of the includes the last current-version render read (or tried). */
 	private partialPaths: string[] = [];
 	private stamps: Record<string, string> = {};
+	/** `template.json` stamp: the config is re-read when the file changes. */
+	private configStamps: Record<string, string> = {};
+	/** Problems of the last render pass (per-file failures). */
+	private lastRenderProblems: readonly string[] = [];
 	private startupTexts: Record<string, string> = {};
 	/** Sections pi actually loaded for SYSTEM/APPEND — "ours/foreign" recognition. */
 	private piLoadedSections: { customPrompt?: string; appendSystemPrompt?: string } | undefined;
@@ -258,6 +262,7 @@ export class TemplateSession {
 		this.sources = sources;
 		this.noteProblems(problems);
 		this.startupTexts = this.readTargetTexts();
+		this.configStamps = sourceStamps([this.configPath()]);
 		this.rememberStamps();
 	}
 
@@ -357,6 +362,7 @@ export class TemplateSession {
 		);
 		this.partialPaths = [...partials.paths];
 		this.rememberStamps();
+		this.lastRenderProblems = report.problems;
 		this.noteProblems(report.problems);
 		this.noteWarnings(report.warnings);
 		this.versions.setCurrent({ texts: report.texts, view: { ...this.view } });
@@ -452,7 +458,9 @@ export class TemplateSession {
 			this.pendingDelivery = false;
 		}
 		// Source comparison runs after applying: editing a source in this same
-		// turn marks the context stale but is not applied to the prompt.
+		// turn marks the context stale but is not applied to the prompt. A
+		// config edit is picked up the same way.
+		await this.refreshConfig();
 		await this.refreshSources();
 		this.deliver(event.systemPromptOptions);
 	}
@@ -534,17 +542,20 @@ export class TemplateSession {
 	}
 
 	/** Write a version to the target files: only on a text mismatch, atomically. */
-	private writeVersion(version: ContextVersion): void {
+	private writeVersion(version: ContextVersion): number {
+		let changed = 0;
 		for (const [target, text] of Object.entries(version.texts)) {
 			if (this.readTargetText(target) === text) continue;
 			try {
 				const temporary = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
 				writeFileSync(temporary, text);
 				renameSync(temporary, target);
+				changed += 1;
 			} catch (error) {
 				this.warn(`target ${target} not written: ${errorMessage(error)}`);
 			}
 		}
+		return changed;
 	}
 
 	/**
@@ -983,13 +994,13 @@ export class TemplateSession {
 	 * Rewrite files button: target files on disk get the current version. There
 	 * is no apply — versions, the applied context and session records are not
 	 * touched; if the target files have run ahead of memory that is the normal
-	 * "prompts are stale" (fixed by the apply button or a pi reload).
+	 * "prompts are stale" (fixed by the apply button or a pi reload). The
+	 * report says how many files changed and which failed to render.
 	 */
-	rewriteFiles(): boolean {
+	rewriteFiles(): { ok: boolean; changed: number; problems: readonly string[] } {
 		const current = this.versions.current;
-		if (!this.started || current === null) return false;
-		this.writeVersion(current);
-		return true;
+		if (!this.started || current === null) return { ok: false, changed: 0, problems: this.lastRenderProblems };
+		return { ok: true, changed: this.writeVersion(current), problems: this.lastRenderProblems };
 	}
 
 	/** Session variable change: the current version is re-rendered, not applied. */
@@ -1025,6 +1036,30 @@ export class TemplateSession {
 		if ("problem" in loaded) return { ok: false, problem: loaded.problem };
 		this.statusVariableName = loaded.statusVariable;
 		return { ok: true };
+	}
+
+	/**
+	 * `template.json` is an input of the view: when the file changes, the
+	 * config is re-read and the view is rebuilt (a config edit is an explicit
+	 * action, so the shell values are recomputed too). A broken file keeps
+	 * the previous config with a warning.
+	 */
+	async refreshConfig(): Promise<void> {
+		const stamps = sourceStamps([this.configPath()]);
+		if (!stampsDiffer(this.configStamps, stamps)) return;
+		this.configStamps = stamps;
+		const loaded = loadVarsConfig(this.agentDir, this.env);
+		if ("problem" in loaded) {
+			this.warn(`${loaded.problem} — keeping the previous config`);
+			return;
+		}
+		this.config = loaded;
+		this.statusVariableName = loaded.statusVariable;
+		await this.recomputeAll();
+	}
+
+	private configPath(): string {
+		return join(this.agentDir, "template.json");
 	}
 
 	/** Recompute all variables: an explicit menu command. */
