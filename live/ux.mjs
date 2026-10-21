@@ -548,6 +548,51 @@ check(
 escSession.session.dispose();
 rmSync(escRoot, { recursive: true, force: true });
 
+// ——— TUI: a button press does not close the menu ———
+const stayRoot = mkdtempSync(join(tmpdir(), "pi-template-stay-"));
+process.env.PI_CODING_AGENT_DIR = join(stayRoot, "agent");
+const stayEnv = await makeEnvironment(stayRoot);
+const stayUi = makeUi("tui");
+const staySession = await pi.createAgentSession({
+	cwd: stayEnv.projectDir,
+	agentDir: stayEnv.agentDir,
+	modelRuntime: stayEnv.modelRuntime,
+	model: stayEnv.model,
+	thinkingLevel: "low",
+	resourceLoader: stayEnv.loader,
+	sessionManager: stayEnv.sessionManager,
+	settingsManager: stayEnv.settingsManager,
+});
+await staySession.session.bindExtensions({ uiContext: stayUi.ui, mode: "tui" });
+const stayRunner = staySession.session.extensionRunner;
+const stayCommand = stayRunner.getCommand("template");
+const stayRun = stayCommand.handler("", stayRunner.createCommandContext());
+
+// Navigate to "rewrite files on disk" and press it.
+await waitFor(() => stayUi.state.customs.length === 1, "menu did not open");
+const rendered = stayUi.state.customs[0].render(90);
+// Rendered lines: separator, title, blank, then the item rows.
+const rewriteItem = rendered.findIndex((line, at) => at >= 3 && line.includes("rewrite files on disk")) - 3;
+check(rewriteItem >= 0, `rewrite row not in the menu: ${rendered.join("\n")}`);
+for (let step = 0; step < rewriteItem; step += 1) stayUi.state.customs[0].handleInput("\x1b[B");
+stayUi.state.customs[0].handleInput("\r");
+await waitFor(() => stayUi.state.customs.length === 2, "the menu did not re-open after the button");
+check(
+	stayUi.state.notifications.some((notice) => notice.message === "pi-template: targets rewritten"),
+	`button message: ${JSON.stringify(stayUi.state.notifications)}`,
+);
+check(
+	stayUi.state.customs[1].render(90).join("\n").includes("> rewrite files on disk"),
+	"the re-opened menu lost the cursor position",
+);
+
+// Esc closes from the re-opened menu.
+stayUi.state.customs[1].handleInput("\x1b");
+await stayRun;
+check(stayUi.state.customs.length === 2, "a new dialog after Esc");
+staySession.session.dispose();
+rmSync(stayRoot, { recursive: true, force: true });
+
 // ——— Broken template.json: a clear message, no crash ———
 const brokenRoot = mkdtempSync(join(tmpdir(), "pi-template-broken-"));
 process.env.PI_CODING_AGENT_DIR = join(brokenRoot, "agent");
