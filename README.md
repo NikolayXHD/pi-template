@@ -115,6 +115,17 @@ Variable fields:
 - **`initial`** — the machine value: a string, `{"shell": "…"}` or
   `{"env": "VAR"}` (a lookup with no command run). A computed `initial`
   makes the variable read-only — a session override is forbidden for it.
+- **`compute`** — a pure derivation from other variables, evaluated in the
+  process (no shell) and re-derived whenever the view changes. The
+  expression is a value: a variable name (its value), `concat` of literals
+  and variables, or a condition (`eq`/`in`, `and`/`or`/`not`) as the strings
+  `"true"`/`"false"`. A boolean expression gives the implied values list
+  `["true", "false"]`; a string one has no list. Not combined with `initial`
+  or `values`. The variable is overridable — a session override wins over
+  the expression; for a boolean variable an override or an `@` value outside
+  `true`/`false` is an error. Expression references must name variables
+  declared earlier (or the implicit `model`/`level`) — an unknown or later
+  name is a config error; `and`, `or`, `not`, `eq`, `in` are reserved names.
 - **`@`** and **`@<agent name>`** — the variable value at a subagent;
   `@<name>` wins over `@`. They replace both the machine and the computed
   value; without either key a subagent sees the machine value (a computed
@@ -134,10 +145,10 @@ Config rules:
   into the command text is forbidden: the command receives variable values
   through the environment;
 - computation follows declaration order; a variable is never computed
-  twice.
+  twice; `compute` expressions see the variables declared earlier.
 
-Value priority: a session override wins over `initial`; computed variables
-have no override.
+Value priority: a session override wins over `initial` and over `compute`;
+shell/env computed variables have no override.
 
 ## Template syntax
 
@@ -146,6 +157,11 @@ error, not a silent rejection:
 
 - `{{#if (eq mode "plan")}}…{{else}}…{{/if}}`,
   `{{#if (in vllm "on" "auto")}}…{{/if}}`, and the same with `{{#unless}}`;
+  conditions compose — `and`, `or`, `not` over comparisons and boolean
+  variables: `{{#if (or is_flash (eq level "off"))}}…{{/if}}`;
+- a bare name as a condition — a boolean variable (values `true`/`false`, a
+  `compute` expression): `{{#if is_flash}}…{{/if}}`. Truth is the exact
+  string `"true"`, anything else — including `"false"` — is false;
 - interpolation `{{mode}}` — declared variables and the implicit
   `{{model}}`/`{{level}}`;
 - **partials**: `{{> roles/snippets/tests.md}}` — the name is a path from
@@ -188,12 +204,13 @@ The extension's only command opens the context management menu:
   (the prompt equals a fresh render), `!` a re-render is waiting (a source
   was edited, or a variable change altered the render), `‼` no view built
   (a broken config);
-- rows of the variables: the value; for computed ones the value age and
-  recompute on Enter; for overridden ones "session override"; the variable
-  status as the last segment — a colored glyph: `✓` green (the value is in
-  the applied context) or `!` yellow (it differs — the context has not
-  been applied since); implicit `model`/`level` are rows of the list as
-  well — read-only, they change during a session (model switch, thinking
+- rows of the variables: the value; for shell-computed ones the value age
+  and recompute on Enter (a `compute` derivation is an ordinary row —
+  overridable, without an age); for overridden ones "session override"; the
+  variable status as the last segment — a colored glyph: `✓` green (the
+  value is in the applied context) or `!` yellow (it differs — the context
+  has not been applied since); implicit `model`/`level` are rows of the list
+  as well — read-only, they change during a session (model switch, thinking
   level), so their status matters like any other's;
 - "recompute all variables";
 - "update current session context" — applying the current version;
@@ -233,8 +250,9 @@ The extension keeps two versions of the context files in memory: the
   (the extension writes the current version on `session_shutdown`). "Rewrite
   files on disk" writes the targets without applying anything.
 - Sources and the files of the last render's includes are compared by
-  `mtime`+`size` on every turn; computed variables are recomputed only by
-  explicit menu actions.
+  `mtime`+`size` on every turn; shell computations run only by explicit
+  menu actions, `compute` expressions are re-derived on every view change
+  (model/level, overrides).
 
 ## Subagents
 

@@ -9,24 +9,28 @@ needs prompt delivery, the menu and cross-process reads.
 
 ## Automated check
 
-`node probe.mjs` — 94 scenarios without a framework and without a pi
+`node probe.mjs` — 119 scenarios without a framework and without a pi
 process: it prints `ok — name`, on failure `FAIL — name`, and `ALL OK` at
 the end. Coverage:
 
 - **engine**: `template.json` parsing, the shell value contract and command
-  environment, `@` values, strict canonical serialization; grammar and lint
-  (legal and rejected forms, the `@` qualifier, partials with resolution on
-  disk, literals and levels), render (include texts are read and linted when
-  included), the two-stage agent file render;
+  environment, `@` values, strict canonical serialization; `compute`
+  expressions (forms, broken expressions, references and the declaration
+  order, the boolean domain of inputs and `@` values, derivation chains,
+  re-derivation over a changed view, child views); grammar and lint
+  (legal and rejected forms, boolean variables and `and`/`or`/`not`, the
+  `@` qualifier, partials with resolution on disk, literals and levels),
+  render (condition truthiness, connectives, include texts are read and
+  linted when included), the two-stage agent file render;
 - **consumption points**: the target file lock (re-entry, foreign and stale
   ownership), the source list and include resolution, `mtime+size` versions
   (including the files of the last render's includes), set render with file
   failures, subagent identity, session lifecycle
   (start apply, delivery by replacement and addition, `/reload`, read and
-  spawn brackets, recompute);
+  spawn brackets, recompute, derived variables following the model);
 - **UX**: `"var"` records (strict payload, `"role"` ignored), menu
-  composition, computed ages, the status line, the `statusVariable` field
-  and the quick-switch rings (`ctrl+r`/`alt+r`).
+  composition, computed ages, derived variable rows, the status line, the
+  `statusVariable` field and the quick-switch rings (`ctrl+r`/`alt+r`).
 
 ## Live runs
 

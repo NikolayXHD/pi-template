@@ -32,6 +32,7 @@ import { inspect } from "node:util";
 import {
 	canonicalJson,
 	computeView,
+	evaluateExpressions,
 	firstShellLine,
 	isComputedVariable,
 	loadVarsConfig,
@@ -144,7 +145,7 @@ const NO_PARTIALS = mockPartials(new Map());
 /** Lint context: variable value lists and the include resolver of both roots. */
 function lintContext(overrides = {}) {
 	return {
-		variables: overrides.variables ?? { role: ["a", "b"], vllm: ["on", "off"], free: undefined },
+		variables: overrides.variables ?? { role: ["a", "b"], vllm: ["on", "off"], flash: ["true", "false"], free: undefined },
 		partials: overrides.partials ?? PARTIALS,
 		agentName: overrides.agentName,
 	};
@@ -273,6 +274,108 @@ scenario("when_status_variable_rejected_then_problem_names_variable", async () =
 	// A shell list is declared but its emptiness is known only at runtime.
 	const shellList = parseVarsConfig(JSON.stringify({ vars: { role: { values: { shell: "ls" } } }, statusVariable: "role" }), NO_ENV);
 	assert(!("problem" in shellList), "a shell value list was rejected");
+});
+
+scenario("when_compute_declared_then_form_parsed", async () => {
+	const loaded = parseVarsConfig(
+		JSON.stringify({
+			vars: {
+				mode: { values: ["plan", "code"] },
+				is_flash: { compute: 'in model "a" "b"' },
+				paren: { compute: "(is_flash)" },
+				copy: { compute: "is_flash" },
+				file: { compute: 'concat "modes/" mode ".md"' },
+				literal: { compute: '"flash"' },
+			},
+		}),
+		NO_ENV,
+	);
+	assert(!("problem" in loaded), `form rejected: ${loaded.problem ?? ""}`);
+	assertEqual(loaded.vars.file.compute, 'concat "modes/" mode ".md"', "compute field not parsed");
+	assertEqual(loaded.vars.literal.compute, '"flash"', "literal expression not parsed");
+});
+
+scenario("when_compute_conflicts_then_problem_names_variable", async () => {
+	const cases = [
+		["compute with initial", { compute: 'in model "a"', initial: "x" }],
+		["compute with values", { compute: 'in model "a"', values: ["true"] }],
+	];
+	for (const [name, spec] of cases) {
+		const loaded = parseVarsConfig(JSON.stringify({ vars: { is_flash: spec } }), NO_ENV);
+		assert("problem" in loaded, `${name}: accepted`);
+		assert(loaded.problem.includes('"is_flash"'), `${name}: variable not named: ${loaded.problem ?? ""}`);
+	}
+});
+
+scenario("when_compute_expression_broken_then_problem_names_variable", async () => {
+	const cases = [
+		["foreign helper", "frob x"],
+		["in without values", "in"],
+		["eq without a value", "eq a"],
+		["eq with two values", 'eq a "b" "c"'],
+		["non-literal comparison", "eq a b"],
+		["not without an operand", "(not)"],
+		["not with two operands", '(not (eq a "b") (eq a "c"))'],
+		["literal operand of or", '(or "x" (eq a "b"))'],
+		["condition operand of concat", 'concat (eq a "b")'],
+		["concat without segments", "(concat)"],
+		["hash arguments", '(eq a="b")'],
+		["empty", ""],
+		["garbage", "a b ("],
+		["not a string", 42],
+	];
+	for (const [name, compute] of cases) {
+		const loaded = parseVarsConfig(JSON.stringify({ vars: { a: { values: ["b"] }, is_flash: { compute } } }), NO_ENV);
+		assert("problem" in loaded, `${name}: accepted`);
+		assert(loaded.problem.includes('"is_flash"'), `${name}: variable not named: ${loaded.problem ?? ""}`);
+	}
+});
+
+scenario("when_compute_references_then_declared_earlier_only", async () => {
+	const forward = parseVarsConfig(
+		JSON.stringify({ vars: { first: { compute: 'eq second "x"' }, second: { values: ["x"] } } }),
+		NO_ENV,
+	);
+	assert("problem" in forward && forward.problem.includes('"second"'), `forward reference accepted: ${forward.problem ?? ""}`);
+	const unknown = parseVarsConfig(JSON.stringify({ vars: { is_flash: { compute: 'eq ghost "x"' } } }), NO_ENV);
+	assert("problem" in unknown && unknown.problem.includes('"ghost"'), `unknown reference accepted: ${unknown.problem ?? ""}`);
+	const self = parseVarsConfig(JSON.stringify({ vars: { loop: { compute: 'eq loop "x"' } } }), NO_ENV);
+	assert("problem" in self && self.problem.includes('"loop"'), `self reference accepted: ${self.problem ?? ""}`);
+	const implicit = parseVarsConfig(JSON.stringify({ vars: { is_flash: { compute: 'in model "a" "b"' } } }), NO_ENV);
+	assert(!("problem" in implicit), `implicit reference rejected: ${implicit.problem ?? ""}`);
+});
+
+scenario("when_reserved_name_declared_then_problem", async () => {
+	for (const name of ["and", "or", "not", "eq", "in"]) {
+		const loaded = parseVarsConfig(JSON.stringify({ vars: { [name]: { initial: "x" } } }), NO_ENV);
+		assert("problem" in loaded, `${name}: accepted`);
+		assert(loaded.problem.includes(name), `${name}: name not in the message`);
+	}
+});
+
+scenario("when_status_variable_is_derived_then_accepted", async () => {
+	const loaded = parseVarsConfig(
+		JSON.stringify({ vars: { is_flash: { compute: 'in model "a"' } }, statusVariable: "is_flash" }),
+		NO_ENV,
+	);
+	assert(!("problem" in loaded), `derived status variable rejected: ${loaded.problem ?? ""}`);
+});
+
+scenario("when_subagent_value_outside_boolean_domain_then_problem", async () => {
+	const any = parseVarsConfig(JSON.stringify({ vars: { is_flash: { compute: 'in model "a"', "@": "yes" } } }), NO_ENV);
+	assert("problem" in any && any.problem.includes('"@"'), `foreign "@" accepted: ${any.problem ?? ""}`);
+	const byName = parseVarsConfig(JSON.stringify({ vars: { is_flash: { compute: 'in model "a"', "@plan": "" } } }), NO_ENV);
+	assert("problem" in byName && byName.problem.includes('"@plan"'), `foreign "@plan" accepted: ${byName.problem ?? ""}`);
+	const inDomain = parseVarsConfig(
+		JSON.stringify({ vars: { is_flash: { compute: 'in model "a"', "@": "false", "@plan": "true" } } }),
+		NO_ENV,
+	);
+	assert(!("problem" in inDomain), `domain values rejected: ${inDomain.problem ?? ""}`);
+	const stringDerived = parseVarsConfig(
+		JSON.stringify({ vars: { label: { compute: 'concat "x" model', "@": "anything" } } }),
+		NO_ENV,
+	);
+	assert(!("problem" in stringDerived), `string derived refused a foreign value: ${stringDerived.problem ?? ""}`);
 });
 
 // ============================================================================
@@ -431,6 +534,197 @@ scenario("when_override_of_computed_then_problem_and_computed_value", async () =
 	});
 	assertEqual(lookup.problems.length, 1, "no read-only problem for env");
 	assertEqual(lookup.view, { fx: "bar" }, "env lookup lost");
+});
+
+scenario("when_compute_evaluated_then_value_and_implied_list", async () => {
+	const derived = config({
+		is_flash: { compute: 'in model "a" "b"' },
+		label: { compute: 'concat "m:" model' },
+	});
+	const on = await computeView({
+		config: derived,
+		agentDir: AGENT_DIR,
+		projectDir: PROJECT_DIR,
+		implicit: { model: "a" },
+		env: {},
+		execute: noShell,
+	});
+	assertEqual(on.view.is_flash, "true", "boolean expression did not evaluate");
+	assertEqual(on.view.label, "m:a", "string expression did not evaluate");
+	assertEqual(on.values.is_flash, ["true", "false"], "boolean variable lost its values list");
+	assertEqual(on.values.label, undefined, "string derived variable got a values list");
+	const off = await computeView({
+		config: derived,
+		agentDir: AGENT_DIR,
+		projectDir: PROJECT_DIR,
+		implicit: { model: "c" },
+		env: {},
+		execute: noShell,
+	});
+	assertEqual(off.view.is_flash, "false", "the other branch not evaluated");
+	assertEqual(off.view.label, "m:c", "string expression not re-evaluated");
+});
+
+scenario("when_compute_chained_then_derived_follows_inputs", async () => {
+	const chained = config({
+		is_flash: { compute: 'in model "a" "b"' },
+		is_dumb: { compute: 'or is_flash (eq level "off")' },
+		is_copy: { compute: "is_dumb" },
+	});
+	const cases = [
+		[{ model: "a", level: "high" }, "true", "true", "true"],
+		[{ model: "a", level: "off" }, "true", "true", "true"],
+		[{ model: "c", level: "off" }, "false", "true", "true"],
+		[{ model: "c", level: "high" }, "false", "false", "false"],
+	];
+	for (const [implicit, flash, dumb, copy] of cases) {
+		const report = await computeView({
+			config: chained,
+			agentDir: AGENT_DIR,
+			projectDir: PROJECT_DIR,
+			implicit,
+			env: {},
+			execute: noShell,
+		});
+		assertEqual(report.view.is_flash, flash, `is_flash for ${JSON.stringify(implicit)}`);
+		assertEqual(report.view.is_dumb, dumb, `is_dumb for ${JSON.stringify(implicit)}`);
+		assertEqual(report.view.is_copy, copy, `is_copy for ${JSON.stringify(implicit)}`);
+	}
+});
+
+scenario("when_compute_overridden_then_input_wins_over_expression_and_subagent", async () => {
+	const report = await computeView({
+		config: config({ is_flash: { compute: 'in model "a"', subagentAny: "true" } }),
+		agentDir: AGENT_DIR,
+		projectDir: PROJECT_DIR,
+		implicit: { model: "a", is_flash: "false" },
+		agentName: "foo",
+		env: {},
+		execute: noShell,
+	});
+	assertEqual(report.view.is_flash, "false", "input did not win");
+	assertEqual(report.problems, [], "an override of a derived variable is not an error");
+});
+
+scenario("when_input_outside_boolean_domain_then_problem_and_expression_value", async () => {
+	const report = await computeView({
+		config: config({ is_flash: { compute: 'in model "a"' } }),
+		agentDir: AGENT_DIR,
+		projectDir: PROJECT_DIR,
+		implicit: { model: "a", is_flash: "yes" },
+		env: {},
+		execute: noShell,
+	});
+	assertEqual(report.view.is_flash, "true", "the expression value lost to a foreign input");
+	assertEqual(
+		report.problems,
+		['variable "is_flash": input value "yes" ignored — the variable is boolean (true/false)'],
+		"no problem for a foreign input",
+	);
+
+	// A string derived variable has no domain: the input wins as is.
+	const label = await computeView({
+		config: config({ label: { compute: 'concat "m" model' } }),
+		agentDir: AGENT_DIR,
+		projectDir: PROJECT_DIR,
+		implicit: { model: "a", label: "raw" },
+		env: {},
+		execute: noShell,
+	});
+	assertEqual(label.view.label, "raw", "string derived variable refused the input");
+	assertEqual(label.problems, [], "a foreign input of a string variable is not a problem");
+});
+
+scenario("when_subagent_value_then_wins_over_compute", async () => {
+	const report = await computeView({
+		config: config({ is_flash: { compute: 'in model "a"', subagentAny: "false" } }),
+		agentDir: AGENT_DIR,
+		projectDir: PROJECT_DIR,
+		implicit: { model: "a" },
+		agentName: "foo",
+		env: {},
+		execute: noShell,
+	});
+	assertEqual(report.view.is_flash, "false", "the @ value lost to the expression");
+	assertEqual(report.problems, [], "a @ value of a derived variable is not a problem");
+});
+
+scenario("when_compute_literals_outside_lists_then_warnings", async () => {
+	const report = await computeView({
+		config: config({
+			role: { values: ["a", "b"] },
+			warned: { compute: 'or (eq role "z") (eq level "ultra")' },
+		}),
+		agentDir: AGENT_DIR,
+		projectDir: PROJECT_DIR,
+		implicit: { model: "m" },
+		env: {},
+		execute: noShell,
+	});
+	assertEqual(
+		report.warnings,
+		['value "z" is not in the values list of variable "role"', 'value "ultra" is not a thinking level'],
+		"no warnings about the literals",
+	);
+	const dedup = await computeView({
+		config: config({ role: { values: ["a"] }, warned: { compute: 'or (eq role "z") (eq role "z")' } }),
+		agentDir: AGENT_DIR,
+		projectDir: PROJECT_DIR,
+		implicit: { model: "m" },
+		env: {},
+		execute: noShell,
+	});
+	assertEqual(dedup.warnings.length, 1, "a duplicate literal warning not collapsed");
+});
+
+scenario("when_compute_expression_broken_in_view_then_problem_and_no_value", async () => {
+	const report = await computeView({
+		config: config({ is_flash: { compute: "frob x" } }),
+		agentDir: AGENT_DIR,
+		projectDir: PROJECT_DIR,
+		implicit: {},
+		env: {},
+		execute: noShell,
+	});
+	assertEqual(report.view.is_flash, "", "a broken expression gave a value");
+	assertEqual(report.problems.length, 1, "a broken expression gave no problem");
+	assert(report.problems[0].includes('"is_flash"'), `variable not named: ${report.problems[0] ?? ""}`);
+});
+
+scenario("when_expressions_evaluated_over_view_then_derived_follows", async () => {
+	const view = { model: "b", is_flash: "true", is_copy: "true", is_stuck: "old" };
+	evaluateExpressions(
+		config({
+			is_flash: { compute: 'in model "a"' },
+			is_copy: { compute: "is_flash" },
+			is_stuck: { compute: "frob x" },
+		}),
+		view,
+		{ overridden: new Set(["is_copy"]) },
+	);
+	assertEqual(view.is_flash, "false", "the derived value did not follow the model");
+	assertEqual(view.is_copy, "true", "an overridden variable was recomputed");
+	assertEqual(view.is_stuck, "old", "a broken expression changed the value");
+});
+
+scenario("when_variable_value_empty_then_comparisons_match_empty", async () => {
+	const report = await computeView({
+		config: config({
+			empty_one: { initial: { shell: "fail" } },
+			eq_empty: { compute: 'eq empty_one ""' },
+			in_empty: { compute: 'in empty_one "" "x"' },
+			bare: { compute: "empty_one" },
+		}),
+		agentDir: AGENT_DIR,
+		projectDir: PROJECT_DIR,
+		implicit: {},
+		env: {},
+		execute: async () => ({ code: 1, stdout: "", stderr: "boom" }),
+	});
+	assertEqual(report.view.empty_one, "", "the failed command left a value");
+	assertEqual(report.view.eq_empty, "true", "eq over an empty value");
+	assertEqual(report.view.in_empty, "true", "in over an empty value");
+	assertEqual(report.view.bare, "", "a copy of an empty value");
 });
 
 scenario("when_shell_exit_nonzero_then_problem_and_no_value", async () => {
@@ -775,6 +1069,13 @@ scenario("when_legal_forms_then_lint_passes", async () => {
 		// A variable without a value list: interpolation and eq are legal.
 		["interpolation without a list", "branch: {{free}}"],
 		["eq without a list", '{{#if (eq free "x")}}A{{else}}B{{/if}}'],
+		["boolean variable condition", "{{#if flash}}A{{else}}B{{/if}}"],
+		["parenthesized variable condition", "{{#if (flash)}}A{{/if}}"],
+		["unless over a boolean variable", "{{#unless flash}}A{{/unless}}"],
+		["not over a boolean variable", "{{#if (not flash)}}A{{/if}}"],
+		["or of a variable and a comparison", '{{#if (or flash (eq vllm "on"))}}A{{/if}}'],
+		["nested and with parens", '{{#if (and (in model "m1") (not (eq level "low")))}}A{{/if}}'],
+		["or of three operands", '{{#if (or flash (eq vllm "on") (eq level "off"))}}A{{/if}}'],
 	];
 	for (const [name, source] of generic) {
 		const result = lintTemplate(source, lintContext());
@@ -814,7 +1115,15 @@ scenario("when_rejected_forms_then_problem_reported", async () => {
 		["hash in interpolation", "{{vllm foo=1}}"],
 		["interpolation arguments", "{{vllm 1}}"],
 		["foreign block", "{{#each items}}A{{/each}}"],
-		["bare path in a condition", "{{#if vllm}}A{{/if}}"],
+		["bare path of a non-boolean variable", "{{#if vllm}}A{{/if}}"],
+		["or without operands", "{{#if (or)}}A{{/if}}"],
+		["and without operands", "{{#if (and)}}A{{/if}}"],
+		["not with two operands", '{{#if (not (eq vllm "on") (eq vllm "off"))}}A{{/if}}'],
+		["literal operand of or", '{{#if (or "x" (eq vllm "on"))}}A{{/if}}'],
+		["value expression as a condition", '{{#if (concat "a" role)}}A{{/if}}'],
+		["concat operand of a condition", '{{#if (or (concat "a" role) (eq vllm "on"))}}A{{/if}}'],
+		["nested foreign helper", "{{#if (and (frob role))}}A{{/if}}"],
+		["undeclared operand", '{{#if (or flash (eq nope "x"))}}A{{/if}}'],
 		["foreign helper", '{{#if (frob vllm)}}A{{/if}}'],
 		["eq with two values", '{{#if (eq vllm "a" "b")}}A{{/if}}'],
 		["in without values", "{{#if (in vllm)}}A{{/if}}"],
@@ -974,6 +1283,67 @@ scenario("when_render_repeated_then_same_text", async () => {
 	});
 	assertEqual(second, first, "include order affects the render");
 	assertEqual(first, "Start on Role A Role B", "text did not match");
+});
+
+scenario("when_qualified_boolean_operand_then_agent_files_only", async () => {
+	const source = "{{#if (or [flag@] vllm)}}A{{/if}}";
+	const variables = { flag: ["true", "false"], vllm: ["true", "false"] };
+	const agent = lintTemplate(source, { variables, partials: PARTIALS, agentName: "foo" });
+	assertEqual(agent.problem, null, `qualified operand rejected: ${agent.problem ?? ""}`);
+	const outside = lintTemplate(source, { variables, partials: PARTIALS });
+	assert(
+		outside.problem !== null && outside.problem.includes("qualifier"),
+		`outside agent files accepted: ${outside.problem ?? ""}`,
+	);
+});
+
+scenario("when_boolean_variable_condition_then_only_true_is_truthy", async () => {
+	const source = "{{#if is_flash}}A{{else}}B{{/if}}|{{#unless is_flash}}U{{/unless}}|{{#if (not is_flash)}}N{{/if}}";
+	const variables = { is_flash: ["true", "false"] };
+	const cases = [
+		["true", "A||"],
+		["false", "B|U|N"],
+		["", "B|U|N"],
+		["TRUE", "B|U|N"],
+		["yes", "B|U|N"],
+	];
+	for (const [value, expected] of cases) {
+		const rendered = renderTemplate(source, { view: { is_flash: value }, variables, partials: NO_PARTIALS });
+		assertEqual(rendered, expected, `value "${value}"`);
+	}
+});
+
+scenario("when_connectives_rendered_then_boolean_logic", async () => {
+	const source =
+		'{{#if (or is_flash (eq level "off"))}}R{{/if}}{{#if (and is_flash (eq level "off"))}}D{{/if}}{{#if (eq is_flash "false")}}F{{/if}}';
+	const variables = { is_flash: ["true", "false"] };
+	const cases = [
+		[{ is_flash: "true", level: "off" }, "RD"],
+		[{ is_flash: "true", level: "high" }, "R"],
+		[{ is_flash: "false", level: "off" }, "RF"],
+		[{ is_flash: "false", level: "high" }, "F"],
+	];
+	for (const [view, expected] of cases) {
+		assertEqual(
+			renderTemplate(source, { view, variables, partials: NO_PARTIALS }),
+			expected,
+			JSON.stringify(view),
+		);
+	}
+});
+
+scenario("when_boolean_variable_interpolated_then_string_value", async () => {
+	const variables = { is_flash: ["true", "false"] };
+	assertEqual(
+		renderTemplate("{{is_flash}}", { view: { is_flash: "true" }, variables, partials: NO_PARTIALS }),
+		"true",
+		"true not printed",
+	);
+	assertEqual(
+		renderTemplate("{{is_flash}}", { view: { is_flash: "false" }, variables, partials: NO_PARTIALS }),
+		"false",
+		"false not printed",
+	);
 });
 
 // ============================================================================
@@ -2323,6 +2693,136 @@ scenario("when_session_recompute_then_values_and_ages", async () => {
 	});
 });
 
+/** Derived variables follow the model without explicit recompute. */
+scenario("when_model_changes_then_derived_follows", async () => {
+	await withTempTree(async ({ agentDir, projectDir, write }) => {
+		write(
+			"agent/template.json",
+			JSON.stringify({ vars: { is_flash: { compute: 'in model "deepseek/flash" "a/b"' } } }),
+		);
+		write("agent/AGENTS.md.template", "flash {{is_flash}}");
+		const session = new TemplateSession({
+			agentDir,
+			projectDir,
+			parseHeader: simpleHeaderParser,
+			env: {},
+			homeDir: EMPTY_HOME,
+			execute: noShell,
+			now: () => 1000,
+		});
+		const warnings = [];
+		await session.start(sessionHost(warnings), "startup");
+		assertEqual(session.currentView().is_flash, "true", "the startup view is not derived");
+		await session.onModelChanged(sessionHost(warnings, "deepseek/other", "max"));
+		assertEqual(session.currentView().is_flash, "false", "the derived value did not follow the model change");
+		session.shutdown("quit");
+	});
+
+	// The first-turn actual-model correction is a separate view change path.
+	await withTempTree(async ({ agentDir, projectDir, write }) => {
+		write(
+			"agent/template.json",
+			JSON.stringify({ vars: { is_flash: { compute: 'in model "deepseek/flash" "a/b"' } } }),
+		);
+		write("agent/AGENTS.md.template", "flash {{is_flash}}");
+		const session = new TemplateSession({
+			agentDir,
+			projectDir,
+			parseHeader: simpleHeaderParser,
+			env: {},
+			homeDir: EMPTY_HOME,
+			execute: noShell,
+			now: () => 1000,
+		});
+		const warnings = [];
+		await session.start(sessionHost(warnings, "deepseek/other", "max"), "startup");
+		assertEqual(session.currentView().is_flash, "false", "the startup view is not derived");
+		await session.beforeAgentStart({ systemPromptOptions: {} }, sessionHost(warnings, "deepseek/flash", "max"));
+		assertEqual(session.currentView().is_flash, "true", "the model correction did not re-derive");
+		session.shutdown("quit");
+	});
+});
+
+/** A derived variable is overridable and its dependents follow. */
+scenario("when_derived_variable_set_then_override_and_dependents_follow", async () => {
+	await withTempTree(async ({ agentDir, projectDir, write }) => {
+		write(
+			"agent/template.json",
+			JSON.stringify({
+				vars: {
+					is_flash: { compute: 'in model "a"' },
+					is_dumb: { compute: 'or is_flash (eq level "off")' },
+				},
+			}),
+		);
+		write("agent/AGENTS.md.template", "flash {{is_flash}} dumb {{is_dumb}}");
+		const session = new TemplateSession({
+			agentDir,
+			projectDir,
+			parseHeader: simpleHeaderParser,
+			env: {},
+			homeDir: EMPTY_HOME,
+			execute: noShell,
+			now: () => 1000,
+		});
+		const warnings = [];
+		await session.start(sessionHost(warnings, "a", "high"), "startup");
+		assertEqual(session.currentView().is_dumb, "true", "the startup derived value");
+
+		const denied = await session.setVariable("is_flash", "maybe");
+		assert(!denied.ok, "a foreign value was accepted");
+		assert(/boolean/.test(denied.problem ?? ""), `problem not named: ${denied.problem ?? ""}`);
+		const refused = await session.recompute("is_flash");
+		assertEqual(
+			refused,
+			{ ok: false, problem: 'variable "is_flash" is not computed — nothing to recompute' },
+			"a derived variable was offered for recompute",
+		);
+
+		const applied = await session.setVariable("is_flash", "false");
+		assert(applied.ok, `override failed: ${applied.problem ?? ""}`);
+		assertEqual(session.currentView().is_flash, "false", "the override is not in the view");
+		assertEqual(session.currentView().is_dumb, "false", "the dependent variable did not follow the override");
+		session.shutdown("quit");
+	});
+});
+
+/** Child views: `@` values win, the child's own model derives the rest. */
+scenario("when_child_view_computed_then_derived_follows_child_model", async () => {
+	const derived = config({
+		is_flash: { compute: 'in model "a" "b"', subagentAny: "true" },
+		child_flash: { compute: 'in model "a" "b"' },
+	});
+	const child = await computeView({
+		config: derived,
+		agentDir: AGENT_DIR,
+		projectDir: PROJECT_DIR,
+		implicit: { model: "a", level: "low" },
+		agentName: "foo",
+		env: {},
+		execute: noShell,
+	});
+	assertEqual(child.view.child_flash, "true", "the child model did not derive the value");
+	assertEqual(child.view.is_flash, "true", "the @ value lost");
+
+	const other = await computeView({
+		config: derived,
+		agentDir: AGENT_DIR,
+		projectDir: PROJECT_DIR,
+		implicit: { model: "c", level: "low" },
+		agentName: "foo",
+		env: {},
+		execute: noShell,
+	});
+	assertEqual(other.view.child_flash, "false", "the child model did not derive the value");
+	assertEqual(other.view.is_flash, "true", "the @ value did not win over the expression");
+
+	const view = { model: "c", level: "low", is_flash: "true", child_flash: "true" };
+	evaluateExpressions(derived, view, { agentName: "foo" });
+	assertEqual(view.is_flash, "true", "the @ value did not survive re-derivation");
+	assertEqual(view.child_flash, "false", "re-derivation ignored the model");
+});
+
 /** A project skill is added only with trust. */
 scenario("when_project_skill_trust_then_added", async () => {
 	await withTempTree(async ({ agentDir, projectDir, write }) => {
@@ -2750,6 +3250,43 @@ scenario("when_menu_facts_from_session_then_age_and_override", async () => {
 			["change", "recompute", "implicit", "implicit", "recomputeAll", "apply", "rewriteFiles"],
 			"menu actions from the session facts",
 		);
+		session.shutdown("quit");
+	});
+});
+
+/** A derived variable row: editable as usual, no age and no recompute. */
+scenario("when_derived_variable_facts_then_overridable_row", async () => {
+	await withTempTree(async ({ agentDir, projectDir, write }) => {
+		write(
+			"agent/template.json",
+			JSON.stringify({
+				vars: {
+					is_flash: { compute: 'in model "deepseek/flash"' },
+					branch: { initial: { shell: "branch" } },
+				},
+			}),
+		);
+		write("agent/AGENTS.md.template", "flash {{is_flash}}");
+		const session = new TemplateSession({
+			agentDir,
+			projectDir,
+			parseHeader: simpleHeaderParser,
+			env: {},
+			homeDir: EMPTY_HOME,
+			execute: async () => ({ code: 0, stdout: "main\n", stderr: "" }),
+			now: () => 1000,
+		});
+		await session.start(sessionHost([]), "startup");
+		const derived = variableFacts(session, { is_flash: "false" }).find((fact) => fact.name === "is_flash");
+		assertEqual(
+			[derived.computed, derived.ageMs, derived.overridden, derived.values],
+			[false, undefined, true, ["true", "false"]],
+			"derived variable facts",
+		);
+		const actions = menuItems(variableFacts(session, { is_flash: "false" }))
+			.filter((item) => item.facts?.name === "is_flash")
+			.map((item) => item.action);
+		assertEqual(actions, ["change"], "menu actions of a derived variable");
 		session.shutdown("quit");
 	});
 });

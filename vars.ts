@@ -5,12 +5,13 @@
  *
  * Config: `vars` — variable name → fields `values` (a static list or
  * `{"shell": …}`), `initial` (a string, `{"shell": …}`, `{"env": "VAR"}`),
- * `cwd` (`"agent"` by default, `"project"`) and subagent values `@` (any
- * subagent) / `@<agent name>` (a specific one, over `@`) — strings only,
- * they replace both the machine and the computed value. The top-level
- * `statusVariable` names the variable the status line shows. An unknown key
- * is a config error. The `model` and `level` variables are implicit;
- * declaring them is an error.
+ * `compute` (a boolean expression over other variables), `cwd` (`"agent"` by
+ * default, `"project"`) and subagent values `@` (any subagent) /
+ * `@<agent name>` (a specific one, over `@`) — strings only, they replace
+ * both the machine and the computed value. The top-level `statusVariable`
+ * names the variable the status line shows. An unknown key is a config
+ * error. The `model` and `level` variables are implicit; declaring them is
+ * an error.
  *
  * Shell contract:
  * - commands run in the platform system shell (POSIX — `sh -c`, win32 —
@@ -32,6 +33,15 @@
  * read-only: an input value is not applied and produces a problem. A
  * subagent value from an `@` key replaces a computed variable — for that
  * subagent's session it is not computed.
+ *
+ * A `compute` variable is a pure derivation of other variables (expr.ts):
+ * its value comes from a value expression — a variable, `concat` of
+ * literals and variables, or a condition as the strings `"true"`/`"false"`.
+ * A boolean expression gives the implied values list `["true", "false"]`;
+ * a string one has no list. The variable is recomputed whenever the view
+ * changes and is not read-only: an input (session override) wins over the
+ * expression, an `@` value over both. For a boolean variable an input or an
+ * `@` value outside `true`/`false` is an error — the domain is exact.
  */
 
 import { spawn } from "node:child_process";
@@ -39,12 +49,16 @@ import type { ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { BOOLEAN_VALUES, evalValue, exprAtoms, exprVariables, isExprProblem, literalWarnings, parseExpr } from "./expr.ts";
+import type { ExprNode } from "./expr.ts";
 
 /** Shell command timeout, ms. */
 export const SHELL_TIMEOUT_MS = 5000;
 
 const CONFIG_FILE = "template.json";
 const VARIABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+/** Names the condition language gives meaning to — a variable cannot take them. */
+const RESERVED_NAMES = ["and", "or", "not", "eq", "in"] as const;
 /** Agent name: the same form pi-subagents checks (herdr-placed-run). */
 const AGENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
@@ -64,6 +78,8 @@ export interface VariableSpec {
 	values?: string[] | ShellCommand;
 	/** Machine value: a string, a shell command or an env variable lookup. */
 	initial?: string | ShellCommand | EnvLookup;
+	/** Boolean expression over other variables (see expr.ts). */
+	compute?: string;
 	/** `@` key: the variable value for any subagent. */
 	subagentAny?: string;
 	/** `@<agent name>` keys: values for specific subagents, over `@`. */
@@ -92,6 +108,47 @@ export function isAgentName(value: string): boolean {
 export function isComputedVariable(spec: VariableSpec, agentName?: string): boolean {
 	if (agentName !== undefined && subagentValue(spec, agentName) !== undefined) return false;
 	return typeof spec.initial === "object" && spec.initial !== null;
+}
+
+/** A `compute` variable: a pure derivation of other variables (overridable). */
+export function isDerivedVariable(spec: VariableSpec): boolean {
+	return spec.compute !== undefined;
+}
+
+/** `true`/`false` — the domain of a boolean variable. */
+export function isBooleanValue(value: string): boolean {
+	return value === "true" || value === "false";
+}
+
+/**
+ * Whether the variable holds `true`/`false`: its expression is a condition
+ * or a copy of a boolean variable, or its values are `true`/`false`.
+ */
+export function isBooleanVariable(name: string, vars: Record<string, VariableSpec>): boolean {
+	const spec = vars[name];
+	if (spec === undefined) return false;
+	if (spec.compute !== undefined) {
+		const parsed = parseExpr(spec.compute);
+		return !isExprProblem(parsed) && exprIsBoolean(parsed, vars);
+	}
+	const values = spec.values;
+	return Array.isArray(values) && values.length > 0 && values.every(isBooleanValue);
+}
+
+/** Conditions and copies of boolean variables; `concat` and literals are values. */
+function exprIsBoolean(node: ExprNode, vars: Record<string, VariableSpec>): boolean {
+	switch (node.kind) {
+		case "eq":
+		case "in":
+		case "and":
+		case "or":
+		case "not":
+			return true;
+		case "var":
+			return isBooleanVariable(node.name, vars);
+		default:
+			return false;
+	}
 }
 
 /** Subagent value of a variable: `@<name>` → `@`; no keys — `undefined`. */
@@ -139,6 +196,10 @@ export function parseVarsConfig(text: string, env: Record<string, string | undef
 	}
 	const status = parseStatusVariable(value.statusVariable, vars);
 	if (status.problem !== undefined) return { problem: status.problem };
+	const expressionsProblem = computeExpressionsProblem(vars);
+	if (expressionsProblem !== null) return { problem: expressionsProblem };
+	const booleansProblem = subagentBooleanValuesProblem(vars);
+	if (booleansProblem !== null) return { problem: booleansProblem };
 	const config: VarsConfig = { vars };
 	if (status.name !== undefined) config.statusVariable = status.name;
 	return config;
@@ -257,6 +318,26 @@ export async function computeView(options: ComputeViewOptions): Promise<ViewRepo
 			view[name] = subagent;
 			continue;
 		}
+		if (spec.compute !== undefined) {
+			// An input (session override) wins over the expression; a boolean
+			// variable only accepts `true`/`false` (decision: the domain is exact).
+			const input = implicit[name];
+			if (Object.hasOwn(implicit, name)) {
+				if (isBooleanVariable(name, variables) && !isBooleanValue(input)) {
+					problems.push(
+						`variable "${name}": input value "${input}" ignored — the variable is boolean (true/false)`,
+					);
+					// A forbidden input must not leak into the view: the expression
+					// value below replaces it.
+					delete known[name];
+					delete view[name];
+				} else {
+					known[name] = input;
+					view[name] = input;
+				}
+			}
+			continue;
+		}
 		const initial = spec.initial;
 		if (typeof initial === "string") {
 			if (Object.hasOwn(implicit, name)) continue;
@@ -285,6 +366,9 @@ export async function computeView(options: ComputeViewOptions): Promise<ViewRepo
 		const spec = variables[name];
 		const cwd = spec.cwd === "project" ? options.projectDir : options.agentDir;
 		if (Array.isArray(spec.values)) values[name] = [...spec.values];
+		if (spec.compute !== undefined) {
+			values[name] = isBooleanVariable(name, variables) ? [...BOOLEAN_VALUES] : undefined;
+		}
 
 		const commands: Array<{ kind: "values" | "initial"; command: string }> = [];
 		if (isShellCommand(spec.values)) commands.push({ kind: "values", command: spec.values.shell });
@@ -321,6 +405,24 @@ export async function computeView(options: ComputeViewOptions): Promise<ViewRepo
 		warnings.push(...laterComputedReferences(name, spec, names, variables, agentName));
 	}
 
+	// Expression values: pure derivations over the accumulated view, in
+	// declaration order; inputs and `@` values are already in place.
+	for (const name of names) {
+		const spec = variables[name];
+		const source = spec.compute;
+		if (source === undefined || Object.hasOwn(known, name)) continue;
+		const parsed = parseExpr(source);
+		if (isExprProblem(parsed)) {
+			problems.push(`${CONFIG_FILE}: variable "${name}": compute: ${parsed.problem}`);
+			view[name] = "";
+			continue;
+		}
+		const value = evalValue(parsed, view);
+		view[name] = value;
+		known[name] = value;
+		warnings.push(...computeLiteralWarnings(parsed, values));
+	}
+
 	// Every declared variable is present in the view and in values: no value —
 	// an empty string, no list — `undefined`.
 	for (const name of names) {
@@ -329,6 +431,30 @@ export async function computeView(options: ComputeViewOptions): Promise<ViewRepo
 	}
 
 	return { view, values, problems, warnings };
+}
+
+/**
+ * Expression values over an existing view: `compute` variables without an
+ * input value (session override) and without an `@` value are re-derived in
+ * declaration order. Expressions are pure and cheap, so this runs on every
+ * view change (model/level, overrides) — unlike shell computation, which is
+ * explicit only.
+ */
+export function evaluateExpressions(
+	config: VarsConfig,
+	view: Record<string, string>,
+	options: { agentName?: string; overridden?: ReadonlySet<string> } = {},
+): void {
+	for (const name of Object.keys(config.vars)) {
+		const spec = config.vars[name];
+		const source = spec.compute;
+		if (source === undefined) continue;
+		if (options.overridden?.has(name)) continue;
+		if (options.agentName !== undefined && subagentValue(spec, options.agentName) !== undefined) continue;
+		const parsed = parseExpr(source);
+		if (isExprProblem(parsed)) continue;
+		view[name] = evalValue(parsed, view);
+	}
 }
 
 /**
@@ -424,7 +550,10 @@ function parseStatusVariable(raw: unknown, vars: Record<string, VariableSpec>): 
 	if (typeof raw !== "string") return { problem: `${CONFIG_FILE}: "statusVariable" must be a string` };
 	const spec = vars[raw];
 	if (spec === undefined) return { problem: `${CONFIG_FILE}: status variable "${raw}" is not declared` };
-	if (spec.values === undefined || (Array.isArray(spec.values) && spec.values.length === 0)) {
+	if (
+		spec.compute === undefined &&
+		(spec.values === undefined || (Array.isArray(spec.values) && spec.values.length === 0))
+	) {
 		return { problem: `${CONFIG_FILE}: status variable "${raw}" must have a non-empty value list` };
 	}
 	return { name: raw };
@@ -465,6 +594,13 @@ function parseVariableSpec(name: string, raw: unknown): VariableSpec | { problem
 			}
 			continue;
 		}
+		if (key === "compute") {
+			if (typeof value !== "string") {
+				return { problem: `${CONFIG_FILE}: variable "${name}": "compute" must be a string` };
+			}
+			spec.compute = value;
+			continue;
+		}
 		if (key === "cwd") {
 			if (value !== "agent" && value !== "project") {
 				return { problem: `${CONFIG_FILE}: variable "${name}": "cwd" must be "agent" or "project"` };
@@ -493,6 +629,11 @@ function parseVariableSpec(name: string, raw: unknown): VariableSpec | { problem
 		return { problem: `${CONFIG_FILE}: variable "${name}": unknown key "${key}"` };
 	}
 	if (Object.keys(subagentByName).length > 0) spec.subagentByName = subagentByName;
+	if (spec.compute !== undefined && (spec.initial !== undefined || spec.values !== undefined)) {
+		return {
+			problem: `${CONFIG_FILE}: variable "${name}": "compute" is not combined with "initial" or "values"`,
+		};
+	}
 	return spec;
 }
 
@@ -503,10 +644,75 @@ function variableNameProblem(name: string, env: Record<string, string | undefine
 	if ((IMPLICIT_VARIABLE_NAMES as readonly string[]).includes(name)) {
 		return `${CONFIG_FILE}: variable "${name}" is implicit and cannot be declared`;
 	}
+	if ((RESERVED_NAMES as readonly string[]).includes(name)) {
+		return `${CONFIG_FILE}: variable name "${name}" is reserved by the condition language`;
+	}
 	if (env[name] !== undefined) {
 		return `${CONFIG_FILE}: variable "${name}" collides with a process environment variable`;
 	}
 	return null;
+}
+
+/**
+ * Validate `compute` expressions at config load: the grammar (expr.ts), the
+ * names (implicit or declared) and the declaration order — an expression
+ * sees variables declared earlier. Unlike a shell command text, references
+ * here are known exactly, so a forward reference is a config error.
+ */
+function computeExpressionsProblem(vars: Record<string, VariableSpec>): string | null {
+	const names = Object.keys(vars);
+	for (const name of names) {
+		const source = vars[name].compute;
+		if (source === undefined) continue;
+		const parsed = parseExpr(source);
+		if (isExprProblem(parsed)) return `${CONFIG_FILE}: variable "${name}": compute: ${parsed.problem}`;
+		for (const referenced of exprVariables(parsed)) {
+			const implicit = (IMPLICIT_VARIABLE_NAMES as readonly string[]).includes(referenced);
+			const position = names.indexOf(referenced);
+			if (!implicit && position === -1) {
+				return `${CONFIG_FILE}: variable "${name}": compute references unknown variable "${referenced}"`;
+			}
+			if (!implicit && position >= names.indexOf(name)) {
+				return `${CONFIG_FILE}: variable "${name}": compute references "${referenced}" — expected a variable declared earlier`;
+			}
+		}
+	}
+	return null;
+}
+
+/**
+ * An `@` value of a boolean variable is `true`/`false` — the domain of the
+ * derivation is exact, a foreign value is an error.
+ */
+function subagentBooleanValuesProblem(vars: Record<string, VariableSpec>): string | null {
+	for (const [name, spec] of Object.entries(vars)) {
+		if (spec.compute === undefined || !isBooleanVariable(name, vars)) continue;
+		const entries: Array<[string, string]> = [];
+		if (spec.subagentAny !== undefined) entries.push(["@", spec.subagentAny]);
+		for (const [key, value] of Object.entries(spec.subagentByName ?? {})) entries.push([`@${key}`, value]);
+		for (const [key, value] of entries) {
+			if (!isBooleanValue(value)) {
+				return `${CONFIG_FILE}: variable "${name}": "${key}" must be "true" or "false"`;
+			}
+		}
+	}
+	return null;
+}
+
+/** Literal warnings of a `compute` expression against the known values lists. */
+function computeLiteralWarnings(parsed: ExprNode, values: Record<string, string[] | undefined>): string[] {
+	const warnings: string[] = [];
+	const seen = new Set<string>();
+	for (const atom of exprAtoms(parsed)) {
+		const literals = atom.kind === "eq" ? [atom.value] : atom.kind === "in" ? atom.values : [];
+		for (const value of literals) {
+			const key = `${atom.name}\u0000${value}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			warnings.push(...literalWarnings(atom.name, value, values[atom.name]));
+		}
+	}
+	return warnings;
 }
 
 /**

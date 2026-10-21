@@ -38,7 +38,11 @@ import {
 	type ShellExecutor,
 	type VarsConfig,
 	computeView,
+	evaluateExpressions,
+	isBooleanValue,
+	isBooleanVariable,
 	isComputedVariable,
+	isDerivedVariable,
 	loadVarsConfig,
 	writeStatusVariable,
 } from "./vars.ts";
@@ -462,6 +466,7 @@ export class TemplateSession {
 		this.view.model = host.model;
 		this.view.level = host.level;
 		this.childViews.clear();
+		this.refreshExpressions();
 		await this.renderCurrent();
 	}
 
@@ -491,6 +496,7 @@ export class TemplateSession {
 		this.view.model = host.model;
 		this.view.level = host.level;
 		this.childViews.clear();
+		this.refreshExpressions();
 		await this.renderCurrent();
 		return true;
 	}
@@ -996,8 +1002,12 @@ export class TemplateSession {
 		if (isComputedVariable(spec, this.agentName)) {
 			return { ok: false, problem: `variable "${name}" is computed — override not allowed` };
 		}
+		if (isDerivedVariable(spec) && isBooleanVariable(name, config.vars) && !isBooleanValue(value)) {
+			return { ok: false, problem: `variable "${name}": value "${value}" is not a boolean (true/false)` };
+		}
 		this.overrides[name] = value;
 		this.view[name] = value;
+		this.refreshExpressions();
 		await this.renderCurrent();
 		return { ok: true };
 	}
@@ -1066,6 +1076,7 @@ export class TemplateSession {
 			if (report.view[item] !== undefined) this.view[item] = report.view[item];
 			this.values[item] = report.values[item];
 		}
+		this.refreshExpressions();
 		this.recordComputedAges(Object.keys(prefix));
 		this.noteProblems(report.problems);
 		this.noteWarnings(report.warnings);
@@ -1079,6 +1090,20 @@ export class TemplateSession {
 		if (this.view.model !== undefined) implicit.model = this.view.model;
 		if (this.view.level !== undefined) implicit.level = this.view.level;
 		return implicit;
+	}
+
+	/**
+	 * `compute` variables follow their inputs (model/level, overrides) —
+	 * pure expressions are re-derived on every view change, unlike shell
+	 * values, which are recomputed explicitly.
+	 */
+	private refreshExpressions(): void {
+		const config = this.config;
+		if (config === undefined) return;
+		evaluateExpressions(config, this.view, {
+			agentName: this.agentName,
+			overridden: new Set(Object.keys(this.overrides)),
+		});
 	}
 }
 

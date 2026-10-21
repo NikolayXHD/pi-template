@@ -1,13 +1,14 @@
 /**
  * Grammar, lint, partials and template render.
  *
- * The vocabulary is deliberately narrow: `if`/`unless` blocks over `eq`/`in`
- * conditions whose first argument is a declared variable and the rest are
- * string literals; interpolation `{{v}}` of declared variables; partials —
- * static (`{{> roles/snippets/tests.md}}` — the name is a path from the
- * root) and dynamic (`{{> (concat "roles/" role ".md")}}` — `concat` of
- * literal segments and variables); comments. Everything else is a lint
- * error, not a silent render rejection.
+ * The vocabulary is deliberately narrow: `if`/`unless` blocks over
+ * conditions (the expression grammar of expr.ts: `eq`/`in` over a variable
+ * and string literals, `and`/`or`/`not` over subexpressions, a bare name —
+ * a boolean variable); interpolation `{{v}}` of declared variables;
+ * partials — static (`{{> roles/snippets/tests.md}}` — the name is a path
+ * from the root) and dynamic (`{{> (concat "roles/" role ".md")}}` —
+ * `concat` of literal segments and variables); comments. Everything else is
+ * a lint error, not a silent render rejection.
  *
  * The `@` qualifier references a variable value at a subagent:
  * `{{[vllm@]}}` (any subagent) and `{{[vllm@foo]}}` (agent `foo`); legal
@@ -25,12 +26,14 @@
  * an agent identity (an `@` qualifier in an include is an error): a
  * vocabulary violation there fails the includer. A literal outside the
  * variable value list and a level outside the thinking level set are a
- * warning (the list may be outdated). Frontmatter is rendered alongside
- * the body.
+ * warning (the list may be outdated). A bare name condition is legal for a
+ * boolean variable (values `true`/`false`) and means `eq name "true"`.
+ * Frontmatter is rendered alongside the body.
  *
  * Render runs in its own environment: `knownHelpersOnly`, `noEscape: true`,
- * `knownHelpers` — `eq` (strict comparison), `in`, `concat`, `if`, `unless`.
- * A missing include at render time is an exception, not silent emptiness.
+ * `knownHelpers` — `eq` (strict comparison), `in`, `and`, `or`, `not`,
+ * `concat`, `if`, `unless`. A missing include at render time is an
+ * exception, not silent emptiness.
  *
  * An agent file is rendered in two stages (the seam for subagent spawn):
  * `renderAgentHeader` — the header iterated to a fixpoint (regular
@@ -42,13 +45,13 @@
  */
 
 import Handlebars from "handlebars";
+import { exprAtoms, exprFromHbs, isExprProblem, isTruthy, literalWarnings } from "./expr.ts";
+import type { ExprAtom } from "./expr.ts";
 import { IMPLICIT_VARIABLE_NAMES, isAgentName } from "./vars.ts";
 
-/** pi thinking levels: condition literals are compared against this set. */
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export { THINKING_LEVELS } from "./expr.ts";
 
 const BLOCK_HELPERS = ["if", "unless"] as const;
-const CONDITION_HELPERS = ["eq", "in"] as const;
 
 export interface LintContext {
 	/** Variable name → known value list; `undefined` — no list. */
@@ -426,63 +429,55 @@ function lintBlock(
 			return;
 		}
 	}
-	const condition = node.params[0] as hbs.AST.SubExpression | undefined;
-	if (condition === undefined || condition.type !== "SubExpression") {
-		issues.errors.push(`condition must be an eq or in call, got ${condition?.type ?? "nothing"}`);
-		return;
-	}
-	lintCondition(condition as hbs.AST.SubExpression, context, issues);
+	const condition = node.params[0] as hbs.AST.Expression;
+	lintCondition(condition, context, issues);
 }
 
-function lintCondition(
-	condition: hbs.AST.SubExpression,
-	context: LintInput,
-	issues: LintIssues,
-): void {
-	if (hasPairs(condition.hash)) {
-		issues.errors.push("condition takes no hash arguments");
+/**
+ * Condition grammar (expr.ts): `eq`/`in` over a variable and string
+ * literals, `and`/`or`/`not` over subexpressions, a bare name — a boolean
+ * variable. A value expression (`concat`, a literal) is not a condition.
+ * Names and literals are checked against the declared variables and their
+ * values lists.
+ */
+function lintCondition(condition: hbs.AST.Expression, context: LintInput, issues: LintIssues): void {
+	const parsed = exprFromHbs(condition);
+	if (isExprProblem(parsed)) {
+		issues.errors.push(parsed.problem);
 		return;
 	}
-	const name = condition.path;
-	if (
-		name.type !== "PathExpression" ||
-		name.data ||
-		name.depth !== 0 ||
-		name.parts.length !== 1 ||
-		!(CONDITION_HELPERS as readonly string[]).includes(name.parts[0])
-	) {
-		issues.errors.push(`helper "${name.original}" is not allowed — only eq and in`);
+	if (parsed.kind === "literal" || parsed.kind === "concat") {
+		issues.errors.push(`condition must be a comparison or a boolean variable, got a value expression`);
 		return;
 	}
-	const [first, ...rest] = condition.params as hbs.AST.Expression[];
-	const firstPath = first as hbs.AST.PathExpression | undefined;
-	if (!first || !firstPath || firstPath.type !== "PathExpression") {
-		issues.errors.push("first condition argument: expected a variable name");
-		return;
-	}
-	const variableProblem = variablePathProblem(firstPath, "first condition argument", context);
-	if (variableProblem !== null) {
-		issues.errors.push(variableProblem);
-		return;
-	}
-	const variable = referenceOf(firstPath).name;
+	for (const atom of exprAtoms(parsed)) lintAtom(atom, context, issues);
+}
 
-	if (name.parts[0] === "eq" && rest.length !== 1) {
-		issues.errors.push("eq takes exactly one value to compare");
+function lintAtom(atom: ExprAtom, context: LintInput, issues: LintIssues): void {
+	const what = atom.kind === "var" ? "condition" : "first condition argument";
+	const resolved = resolveReference(atom.name, what, context);
+	if ("problem" in resolved) {
+		issues.errors.push(resolved.problem);
 		return;
 	}
-	if (name.parts[0] === "in" && rest.length < 1) {
-		issues.errors.push("in takes at least one value");
-		return;
-	}
-	for (const rawValue of rest) {
-		const value = rawValue as hbs.AST.Expression;
-		if (value.type !== "StringLiteral") {
-			issues.errors.push(`value must be a string literal, got ${value.type}`);
-			return;
+	if (atom.kind === "var") {
+		if (!isBooleanVariable(resolved.name, context)) {
+			issues.errors.push(
+				`condition: variable "${resolved.name}" is not boolean — expected values true/false`,
+			);
 		}
-		literalWarning(variable, (value as hbs.AST.StringLiteral).value, context, issues);
+		return;
 	}
+	const values = context.variables[resolved.name];
+	for (const value of atom.kind === "eq" ? [atom.value] : atom.values) {
+		issues.warnings.push(...literalWarnings(resolved.name, value, values));
+	}
+}
+
+/** A bare name condition is legal for a variable with values `true`/`false`. */
+function isBooleanVariable(name: string, context: LintInput): boolean {
+	const values = context.variables[name];
+	return values !== undefined && values.length > 0 && values.every((value) => value === "true" || value === "false");
 }
 
 type VariableReference = { name: string; agent: string | null };
@@ -498,10 +493,20 @@ function parseReference(part: string): VariableReference | { problem: string } {
 	return { name, agent };
 }
 
-function referenceOf(path: hbs.AST.PathExpression): VariableReference {
-	const reference = parseReference(path.parts[0]);
-	// Called after a successful variablePathProblem.
-	return "problem" in reference ? { name: path.parts[0], agent: null } : reference;
+/** The variable the name refers to — with the `@` qualifier rules — or the problem. */
+function resolveReference(
+	name: string,
+	what: string,
+	context: LintInput,
+): VariableReference | { problem: string } {
+	const reference = parseReference(name);
+	if ("problem" in reference) return { problem: `${what}: ${reference.problem}` };
+	const qualifierProblem = checkQualifier(reference, what, context);
+	if (qualifierProblem !== null) return { problem: qualifierProblem };
+	if (!isDeclaredVariable(reference.name, context)) {
+		return { problem: `${what}: variable "${reference.name}" is not declared` };
+	}
+	return reference;
 }
 
 /** Error: the path is not a declared variable. `null` — all good. */
@@ -513,12 +518,8 @@ function variablePathProblem(
 	if (path.data) return `${what}: @data references are not allowed`;
 	if (path.depth !== 0) return `${what}: context paths ../ are not allowed`;
 	if (path.parts.length !== 1) return `${what}: "${path.original}" — expected a variable name`;
-	const reference = parseReference(path.parts[0]);
-	if ("problem" in reference) return `${what}: ${reference.problem}`;
-	const qualifierProblem = checkQualifier(reference, what, context);
-	if (qualifierProblem !== null) return qualifierProblem;
-	if (!isDeclaredVariable(reference.name, context)) return `${what}: variable "${reference.name}" is not declared`;
-	return null;
+	const resolved = resolveReference(path.parts[0], what, context);
+	return "problem" in resolved ? resolved.problem : null;
 }
 
 function checkQualifier(
@@ -539,16 +540,6 @@ function checkQualifier(
 
 function isDeclaredVariable(name: string, context: LintInput): boolean {
 	return (IMPLICIT_VARIABLE_NAMES as readonly string[]).includes(name) || Object.hasOwn(context.variables, name);
-}
-
-function literalWarning(variable: string, value: string, context: LintInput, issues: LintIssues): void {
-	if (variable === "level" && !(THINKING_LEVELS as readonly string[]).includes(value)) {
-		issues.warnings.push(`value "${value}" is not a thinking level`);
-	}
-	const values = context.variables[variable];
-	if (values !== undefined && !values.includes(value)) {
-		issues.warnings.push(`value "${value}" is not in the values list of variable "${variable}"`);
-	}
 }
 
 function lintPartial(
@@ -727,6 +718,11 @@ function renderLinted(
 	const environment = Handlebars.create();
 	environment.registerHelper("eq", eqHelper);
 	environment.registerHelper("in", inHelper);
+	environment.registerHelper("and", andHelper);
+	environment.registerHelper("or", orHelper);
+	environment.registerHelper("not", notHelper);
+	environment.registerHelper("if", ifHelper);
+	environment.registerHelper("unless", unlessHelper);
 	environment.registerHelper("concat", concatHelper);
 	for (const [name, text] of texts) {
 		environment.registerPartial(name, text);
@@ -734,7 +730,7 @@ function renderLinted(
 	const template = environment.compile(source, {
 		knownHelpersOnly: true,
 		noEscape: true,
-		knownHelpers: { eq: true, in: true, concat: true, if: true, unless: true },
+		knownHelpers: { eq: true, in: true, and: true, or: true, not: true, concat: true, if: true, unless: true },
 	});
 	return template(view);
 }
@@ -842,6 +838,40 @@ function inHelper(...args: unknown[]): boolean {
 	const values = stringArgs(args);
 	const [value, ...rest] = values;
 	return rest.includes(value);
+}
+
+function andHelper(...args: unknown[]): boolean {
+	return conditionArgs(args).every(isTruthy);
+}
+
+function orHelper(...args: unknown[]): boolean {
+	return conditionArgs(args).some(isTruthy);
+}
+
+function notHelper(...args: unknown[]): boolean {
+	return !isTruthy(conditionArgs(args)[0]);
+}
+
+/** Condition operands: strings and booleans — the options object is dropped. */
+function conditionArgs(args: unknown[]): unknown[] {
+	return args.filter((arg) => typeof arg === "string" || typeof arg === "boolean");
+}
+
+interface BlockOptions {
+	fn: (context: unknown) => string;
+	inverse: (context: unknown) => string;
+}
+
+/**
+ * Block condition: a helper result (`true`/`false`) or a view value — a bare
+ * boolean variable is true only for the string `"true"`.
+ */
+function ifHelper(this: unknown, condition: unknown, options: BlockOptions): string {
+	return isTruthy(condition) ? options.fn(this) : options.inverse(this);
+}
+
+function unlessHelper(this: unknown, condition: unknown, options: BlockOptions): string {
+	return isTruthy(condition) ? options.inverse(this) : options.fn(this);
 }
 
 function concatHelper(...args: unknown[]): string {
