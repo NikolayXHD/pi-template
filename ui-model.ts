@@ -122,9 +122,11 @@ export interface MenuItem {
 
 /**
  * Menu items: overridable variables (change value), computed ones (recompute
- * the given one), recompute all, apply and rewrite files on disk. Implicit
- * `model`/`level` are rows of the list as well — read-only, they change
- * during a session (pi's model and thinking level controls).
+ * the given one), recompute all, rewrite files on disk and apply. The file
+ * actions are ordered by the workflow: rewrite the files, read them if you
+ * like, then apply to the session context. Implicit `model`/`level` are rows
+ * of the list as well — read-only, they change during a session (pi's model
+ * and thinking level controls).
  */
 export function menuItems(facts: readonly VariableFacts[]): MenuItem[] {
 	const items: MenuItem[] = [];
@@ -132,7 +134,7 @@ export function menuItems(facts: readonly VariableFacts[]): MenuItem[] {
 		if (fact.implicit) items.push({ action: "implicit", facts: fact });
 		else items.push(fact.computed ? { action: "recompute", facts: fact } : { action: "change", facts: fact });
 	}
-	items.push({ action: "recomputeAll" }, { action: "apply" }, { action: "rewriteFiles" });
+	items.push({ action: "recomputeAll" }, { action: "rewriteFiles" }, { action: "apply" });
 	return items;
 }
 

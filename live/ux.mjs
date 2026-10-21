@@ -187,9 +187,12 @@ const staleStatus = state.statuses.filter(([key]) => key === "template").map(([,
 check(staleStatus === "template ! role=develop", `status after the change: ${staleStatus}`);
 check(state.notifications.at(-1)?.message === "pi-template: role = develop — !", `message after the change: ${state.notifications.at(-1)?.message}`);
 
-// Apply button.
+// Apply button. The menu stays open after an action: the action select plus
+// the re-opened menu (an empty script closes it right away).
+const selectsBeforeApply = state.selects.length;
 state.script.push("update current session context");
 await command.handler("", runner.createCommandContext());
+check(state.selects.length === selectsBeforeApply + 2, `the menu closed after the action: ${state.selects.length - selectsBeforeApply} selects`);
 check(readFileSync(target, "utf-8") === "Role develop; branch main", "apply button did not update the target file");
 const appliedStatus = state.statuses.filter(([key]) => key === "template").map(([, text]) => text).at(-1);
 check(appliedStatus === "template ✓ role=develop", `status after apply: ${appliedStatus}`);
@@ -478,8 +481,8 @@ check(readFileSync(promptTarget, "utf-8") === "Hello develop", "apply corrupted 
 
 const rewriteOptionsList = rewriteUi.state.selects.at(-1).options;
 check(
-	rewriteOptionsList.at(-1) === "rewrite files on disk" &&
-		rewriteOptionsList.at(-2) === "update current session context",
+	rewriteOptionsList.at(-1) === "update current session context" &&
+		rewriteOptionsList.at(-2) === "rewrite files on disk",
 	`menu item order: ${JSON.stringify(rewriteOptionsList)}`,
 );
 rewriteSession.session.dispose();

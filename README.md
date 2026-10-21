@@ -213,9 +213,13 @@ The extension's only command opens the context management menu:
   as well — read-only, they change during a session (model switch, thinking
   level), so their status matters like any other's;
 - "recompute all variables";
-- "update current session context" — applying the current version;
 - "rewrite files on disk" — writing the current version into the targets
-  without applying it.
+  without applying it;
+- "update current session context" — applying the current version.
+
+The file buttons follow the workflow: rewrite first, read the files if you
+like, then apply to the session context. An action does not close the menu —
+the actions are granular and several in a row is the usual case; Esc does.
 
 A variable change is recorded in the
 session (`customType: "var"`, payload `{name, value}`) and does not update

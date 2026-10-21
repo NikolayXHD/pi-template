@@ -3,9 +3,10 @@
  *
  * Menu (pi-tui, like the old roles extension): session context status,
  * variable values (computed ones with value age), changing overridable
- * variables, recomputing the given computed variable, recomputing all, the
- * "update current session context" button (`apply()`) and the "rewrite
- * files on disk" button.
+ * variables, recomputing the given computed variable, recomputing all,
+ * rewriting the targets ("rewrite files on disk") and the "update current
+ * session context" button (`apply()`). The menu stays open after an action
+ * — close it with Esc.
  *
  * A variable change writes a `"var"` record (payload `{name, value}`) and
  * does not apply the context — only marks it stale. The status line is a
@@ -166,8 +167,9 @@ async function runTemplateCommand(pi: ExtensionAPI, deps: TemplateUiDeps, ctx: E
 }
 
 /**
- * Menu until full exit: Esc in a value dialog goes back to the menu, full
- * close only from the menu root (or after a reload).
+ * Menu until full exit: an action does not close the menu — the actions are
+ * granular and several in a row is the usual case; close only with Esc in
+ * the menu root (and after a reload).
  */
 async function runMenuUntilExit(
 	pi: ExtensionAPI,
@@ -181,14 +183,9 @@ async function runMenuUntilExit(
 		const choice = await chooseMenuItem(ctx, session, items, cursor);
 		if (choice === undefined) return; // Esc in the menu root — close
 		cursor = choice.index;
-		const outcome = await performMenuItem(pi, ctx, session, overrides, choice.item);
-		if (outcome === "cancelled") continue; // Esc in a value dialog — back to the menu
-		return;
+		await performMenuItem(pi, ctx, session, overrides, choice.item);
 	}
 }
-
-/** Item outcome: `cancelled` means Esc in a value dialog (step back). */
-type MenuOutcome = "done" | "cancelled";
 
 /** Chosen item and position (the position is the cursor when returning to the menu). */
 interface MenuChoice {
@@ -302,14 +299,14 @@ function renderMenu(
 	return lines;
 }
 
-/** Perform the chosen item. */
+/** Perform the chosen item; the menu stays open afterwards. */
 async function performMenuItem(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
 	session: TemplateSession,
 	overrides: Record<string, string>,
 	item: MenuItem,
-): Promise<MenuOutcome> {
+): Promise<void> {
 	if (item.action === "rewriteFiles") {
 		// The button rewrites files only: apply and reload are not its business;
 		// versions, applied context and session records are not touched.
@@ -318,7 +315,7 @@ async function performMenuItem(
 		} else {
 			ctx.ui.notify("pi-template: nothing to rewrite", "warning");
 		}
-		return "done";
+		return;
 	}
 	if (item.action === "apply") {
 		const applied = session.apply();
@@ -327,7 +324,7 @@ async function performMenuItem(
 			applied ? "pi-template: context updated — delivery on the next turn" : "pi-template: nothing to apply",
 			applied ? "info" : "warning",
 		);
-		return "done";
+		return;
 	}
 	if (item.action === "recomputeAll") {
 		const result = await session.recomputeAll();
@@ -338,19 +335,19 @@ async function performMenuItem(
 				: `pi-template: recompute failed — ${result.problem ?? "unknown reason"}`,
 			result.ok ? "info" : "warning",
 		);
-		return "done";
+		return;
 	}
 	if (item.action === "implicit") {
 		ctx.ui.notify("pi-template: model and level change through pi's own controls — read-only here", "info");
-		return "cancelled";
+		return;
 	}
 	const facts = item.facts;
-	if (facts === undefined) return "done";
+	if (facts === undefined) return;
 	if (item.action === "recompute") {
 		await recomputeVariable(ctx, session, facts.name);
-		return "done";
+		return;
 	}
-	return changeSessionVariable(pi, ctx, session, overrides, facts);
+	await changeSessionVariable(pi, ctx, session, overrides, facts);
 }
 
 /** Recompute the given shell/env variable; the context is not applied. */
@@ -373,9 +370,9 @@ async function changeSessionVariable(
 	session: TemplateSession,
 	overrides: Record<string, string>,
 	facts: VariableFacts,
-): Promise<MenuOutcome> {
+): Promise<void> {
 	const value = await chooseValue(ctx, facts);
-	if (value === undefined) return "cancelled"; // Esc — back to the menu
+	if (value === undefined) return; // Esc — back to the menu
 	const result = await changeVariable(
 		session,
 		(customType, data) => pi.appendEntry(customType, data),
@@ -384,16 +381,15 @@ async function changeSessionVariable(
 	);
 	if (!result.ok) {
 		ctx.ui.notify(`pi-template: ${facts.name} not changed — ${result.problem ?? "unknown reason"}`, "warning");
-		return "done";
+		return;
 	}
 	if (result.written) overrides[facts.name] = value;
 	updateTemplateStatus(ctx, session);
 	if (!result.written) {
 		ctx.ui.notify(`pi-template: ${facts.name} = ${value} — already set`, "info");
-		return "done";
+		return;
 	}
 	ctx.ui.notify(`pi-template: ${facts.name} = ${value} — ${contextStatusMark(session.isStale())}`, "info");
-	return "done";
 }
 
 /** Variable value: a config list or a line input. */

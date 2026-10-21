@@ -3095,8 +3095,8 @@ scenario("when_menu_built_then_implicit_rows_with_status", async () => {
 			["implicit", "model"],
 			["implicit", "level"],
 			["recomputeAll", null],
-			["apply", null],
 			["rewriteFiles", null],
+			["apply", null],
 		],
 		"menu composition",
 	);
@@ -3106,12 +3106,12 @@ scenario("when_menu_built_then_implicit_rows_with_status", async () => {
 	assertEqual(rowText(items[2]), "model = deepseek/flash · ✓", "implicit model row");
 	assertEqual(rowText(items[3]), "level = max · ✓", "implicit level row");
 	assertEqual(rowText(items[4]), "recompute all variables", "recompute-all row");
-	assertEqual(rowText(items[5]), "update current session context", "apply row");
-	assertEqual(rowText(items[6]), "rewrite files on disk", "rewrite-files row");
+	assertEqual(rowText(items[5]), "rewrite files on disk", "rewrite-files row");
+	assertEqual(rowText(items[6]), "update current session context", "apply row");
 	assertEqual(
 		items.filter((item) => item.action === "apply" || item.action === "rewriteFiles").map((item) => item.action),
-		["apply", "rewriteFiles"],
-		"apply must come before rewrite files",
+		["rewriteFiles", "apply"],
+		"rewrite files must come before apply — the user reads the files, then applies",
 	);
 });
 
@@ -3247,7 +3247,7 @@ scenario("when_menu_facts_from_session_then_age_and_override", async () => {
 
 		assertEqual(
 			menuItems(facts).map((item) => item.action),
-			["change", "recompute", "implicit", "implicit", "recomputeAll", "apply", "rewriteFiles"],
+			["change", "recompute", "implicit", "implicit", "recomputeAll", "rewriteFiles", "apply"],
 			"menu actions from the session facts",
 		);
 		session.shutdown("quit");
