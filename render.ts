@@ -103,6 +103,39 @@ export function lintTemplate(source: string, context: LintContext): LintResult {
 	return { problem: bodyResult.problem, warnings: [...headerResult.warnings, ...bodyResult.warnings] };
 }
 
+/**
+ * Include names of a template text: static ones and — for a dynamic name —
+ * every name it resolves to over the variable value lists (the lint rule;
+ * the render resolves one value). A text that does not parse gives the
+ * problem and no names: the file cannot contribute includes.
+ */
+export function collectIncludeNames(
+	source: string,
+	variables: Record<string, string[] | undefined>,
+): { names: string[]; problem: string | null } {
+	let program: hbs.AST.Program;
+	try {
+		program = Handlebars.parse(source);
+	} catch (error) {
+		return { names: [], problem: parseProblem(source, error) };
+	}
+	const names: string[] = [];
+	const visit = (node: hbs.AST.Node): void => {
+		if (node.type === "PartialStatement") {
+			names.push(...partialNames(node as hbs.AST.PartialStatement, variables));
+			return;
+		}
+		if (node.type !== "BlockStatement") return;
+		const block = node as hbs.AST.BlockStatement;
+		for (const body of [block.program, block.inverse]) {
+			if (body === undefined) continue;
+			for (const statement of body.body) visit(statement);
+		}
+	};
+	for (const node of program.body) visit(node);
+	return { names: [...new Set(names)], problem: null };
+}
+
 export interface RenderContext {
 	/** Session variable values: regular references. */
 	view: Record<string, string>;
@@ -823,6 +856,55 @@ function partialName(node: hbs.AST.PartialStatement, view: Record<string, string
 		}
 	}
 	return name;
+}
+
+/**
+ * Include names of one partial statement: the static name, or every name a
+ * dynamic one resolves to over the value lists. A malformed statement gives
+ * no names — lint reports it at render time.
+ */
+function partialNames(
+	node: hbs.AST.PartialStatement,
+	variables: Record<string, string[] | undefined>,
+): string[] {
+	const rawName = node.name as hbs.AST.Expression;
+	if (rawName.type === "PathExpression") return [(rawName as hbs.AST.PathExpression).original];
+	if (rawName.type === "StringLiteral") return [(rawName as hbs.AST.StringLiteral).value];
+	if (rawName.type !== "SubExpression") return [];
+	const segments = concatSegmentsOf(rawName as hbs.AST.SubExpression);
+	return segments === undefined ? [] : resolveConcatNames(segments, variables);
+}
+
+/** `concat` segments of a dynamic name; `undefined` — not a concat of literals and variables. */
+function concatSegmentsOf(subexpr: hbs.AST.SubExpression): ConcatSegment[] | undefined {
+	const name = subexpr.path;
+	if (
+		name.type !== "PathExpression" ||
+		name.data ||
+		name.depth !== 0 ||
+		name.parts.length !== 1 ||
+		name.parts[0] !== "concat"
+	) {
+		return undefined;
+	}
+	const segments: ConcatSegment[] = [];
+	for (const rawParam of subexpr.params) {
+		const param = rawParam as hbs.AST.Expression;
+		if (param.type === "StringLiteral") {
+			segments.push({ kind: "literal", value: (param as hbs.AST.StringLiteral).value });
+			continue;
+		}
+		if (param.type === "PathExpression") {
+			const path = param as hbs.AST.PathExpression;
+			if (path.data || path.depth !== 0 || path.parts.length !== 1) return undefined;
+			const reference = parseReference(path.parts[0]);
+			if ("problem" in reference) return undefined;
+			segments.push({ kind: "variable", name: reference.name });
+			continue;
+		}
+		return undefined;
+	}
+	return segments;
 }
 
 function eqHelper(left: unknown, right: unknown): boolean {

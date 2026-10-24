@@ -1,26 +1,24 @@
 /**
  * Package type check: generates `tsconfig.json` in a temporary directory
  * (paths to the pi SDK and its types are machine-dependent and do not go
- * into the repository) and runs `tsc` from PATH.
+ * into the repository) and runs `tsc` from PATH. The SDK paths come from
+ * `sdk.mjs` — the same lookup the live runs use.
  *
  * Run: node live/typecheck.mjs
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { NODE_TYPE_ROOTS, PI_TYPES, PI_TUI_TYPES } from "./sdk.mjs";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
-const globalModules = join(dirname(dirname(process.execPath)), "lib", "node_modules");
-const piRoot = join(globalModules, "@earendil-works", "pi-coding-agent");
-const piTypes = join(piRoot, "dist", "index.d.ts");
-const piTuiTypes = join(piRoot, "node_modules", "@earendil-works", "pi-tui", "dist", "index.d.ts");
-const nodeTypeRoots = join(piRoot, "node_modules", "@types");
-for (const path of [piTypes, piTuiTypes, nodeTypeRoots]) {
-	if (!existsSync(path)) {
-		throw new Error(`not found: ${path} — run the check with the node under which pi is installed globally`);
+const typePaths = { piTypes: PI_TYPES, piTuiTypes: PI_TUI_TYPES, nodeTypeRoots: NODE_TYPE_ROOTS };
+for (const [name, path] of Object.entries(typePaths)) {
+	if (path === undefined || !existsSync(path)) {
+		throw new Error(`pi SDK types not found: ${name} — ${path ?? "no candidate"}`);
 	}
 }
 
@@ -34,10 +32,10 @@ const config = {
 		allowImportingTsExtensions: true,
 		skipLibCheck: true,
 		types: ["node"],
-		typeRoots: [nodeTypeRoots],
+		typeRoots: [NODE_TYPE_ROOTS],
 		paths: {
-			"@earendil-works/pi-coding-agent": [piTypes],
-			"@earendil-works/pi-tui": [piTuiTypes],
+			"@earendil-works/pi-coding-agent": [PI_TYPES],
+			"@earendil-works/pi-tui": [PI_TUI_TYPES],
 		},
 	},
 	include: [join(packageRoot, "*.ts")],

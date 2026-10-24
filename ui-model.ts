@@ -2,8 +2,8 @@
  * ui-model.ts — data and rules of the `/template` menu without pi imports:
  * session records `"var"` (writing and reading the last value), variable
  * facts, selecting overridable variables, menu row labels, computed value
- * age, the status line and the quick-switch rings (`ctrl+r`/`alt+r`). The
- * module is checked by probe.mjs.
+ * age, the rewrite report, the status line and the quick-switch rings
+ * (`ctrl+r`/`alt+r`). The module is checked by probe.mjs.
  *
  * Records: `"var"` is the only record the extension writes, payload
  * strictly `{name, value}`; old-format records (`customType: "role"`) and
@@ -159,6 +159,47 @@ export function menuRowSegments(item: MenuItem): MenuRowSegment[] {
 /** Variable status glyph: `✓` applied, `!` changed without applying. */
 export function variableStatusMark(changed: boolean): string {
 	return changed ? "!" : "✓";
+}
+
+/** Rewrite status of one file. */
+export type RewriteFileStatus = "written" | "unchanged" | "failed" | "not included";
+
+/** Statuses in report order — the summary counts follow it. */
+const REWRITE_STATUSES: readonly RewriteFileStatus[] = ["written", "unchanged", "failed", "not included"];
+
+/** Rewrite result of one file: the status and, on a failure, the reason. */
+export interface RewriteFileReport {
+	/** Display path: an include-style name from the agent root, `.pi/…` for the project. */
+	path: string;
+	status: RewriteFileStatus;
+	/** Reason of a `failed` status, or why a `.template` has no target. */
+	detail?: string;
+}
+
+/** Report of "rewrite files on disk": the status of every file it knows. */
+export interface RewriteReport {
+	ok: boolean;
+	/** Files written. */
+	changed: number;
+	/** Render problems — the same strings the session warns about. */
+	problems: readonly string[];
+	files: readonly RewriteFileReport[];
+}
+
+/** Summary of the rewrite report: the file count per status. */
+export function rewriteSummaryText(report: RewriteReport): string {
+	const parts: string[] = [];
+	for (const status of REWRITE_STATUSES) {
+		const count = report.files.filter((file) => file.status === status).length;
+		if (count > 0) parts.push(`${count} ${status}`);
+	}
+	return parts.length > 0 ? parts.join(", ") : "no files";
+}
+
+/** Menu row of the rewrite report: the status, the file, the reason. */
+export function rewriteRowText(file: RewriteFileReport): string {
+	const detail = file.detail === undefined ? "" : ` — ${file.detail}`;
+	return `${file.status} · ${file.path}${detail}`;
 }
 
 /** Menu row as plain text: labels, digest, tests. */

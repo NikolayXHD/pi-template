@@ -9,7 +9,7 @@ needs prompt delivery, the menu and cross-process reads.
 
 ## Automated check
 
-`node probe.mjs` — 119 scenarios without a framework and without a pi
+`node probe.mjs` — 125 scenarios without a framework and without a pi
 process: it prints `ok — name`, on failure `FAIL — name`, and `ALL OK` at
 the end. Coverage:
 
@@ -23,24 +23,30 @@ the end. Coverage:
   render (condition truthiness, connectives, include texts are read and
   linted when included), the two-stage agent file render;
 - **consumption points**: the target file lock (re-entry, foreign and stale
-  ownership), the source list and include resolution, `mtime+size` versions
+  ownership), the source list, include resolution and include targets (the
+  rendered copy of a mentioned `X.template`, the `.template` files nothing
+  mentions), `mtime+size` versions
   (including the files of the last render's includes), set render with file
   failures, subagent identity, session lifecycle
-  (start apply, delivery by replacement and addition, `/reload`, read and
+  (the start apply at the first prompt assembly, delivery by replacement and
+  addition, `/reload`, read and
   spawn brackets, recompute, derived variables following the model, a
   `template.json` edit picked up mid-session);
 - **UX**: `"var"` records (strict payload, `"role"` ignored), menu
   composition, computed ages, derived variable rows, the menu staying open
-  after an action, the rewrite report, the status line, the `statusVariable`
-  field and the quick-switch rings (`ctrl+r`/`alt+r`).
+  after an action, the rewrite report (the summary and the per-file status:
+  `written`, `unchanged`, `failed`, `not included`), the apply hotkey
+  (`ctrl+alt+r`), the status line, the
+  `statusVariable` field and the quick-switch rings (`ctrl+r`/`alt+r`).
 
 ## Live runs
 
-Requirements: `npm install` in the package (handlebars) and `pi` installed
-globally under the same `node` (the SDK is looked up from
-`process.execPath` in `live/sdk.mjs`; if pi is not found the script says
-so). Run from the package root; temporary directories are created by the
-scripts themselves:
+Requirements: `npm install` in the package (handlebars) and the pi SDK of
+the installation the checks run against: `live/sdk.mjs` looks it up in the
+global `node_modules` of the `node` that runs the script and in the pi
+managed install (`PI_MANAGED_INSTALL_ROOT` releases); if pi is not found the
+script says so. Run from the package root; temporary directories are created
+by the scripts themselves:
 
 ```bash
 node live/smoke.mjs          # extension load, the first target render
@@ -67,7 +73,7 @@ Expectations:
   `DERIVED TEXT SMOKE OK`;
 - `registration` — the marker has `id: "pi-template"` and the `index.ts`
   path, `REGISTRATION SMOKE OK`;
-- `ux` — 91 `ok:` checks, `LIVE UX OK` at the end (a failure gives
+- `ux` — 115 `ok:` checks, `LIVE UX OK` at the end (a failure gives
   `LIVE UX FAIL` and exit code 1);
 - `typecheck` — `TYPECHECK OK` (`tsc` must be in `PATH`).
 
@@ -88,8 +94,10 @@ hand below.
   are no new-format role records (`"role"` is the old format and is
   ignored).
 - **Targets**: `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`,
-  `skills/*/SKILL.md`, `prompts/*.md`, `agents/*.md` next to their sources;
-  they must not contain raw `{{…}}` tags.
+  `skills/*/SKILL.md`, `prompts/*.md`, `agents/*.md` next to their sources, and
+  the target of every mentioned `X.template` (include sources — for example
+  `roles/snippets/tests.md` next to `roles/snippets/tests.md.template`); they
+  must not contain raw `{{…}}` tags.
 - **Warnings** arrive as UI notifications; their text is part of the
   expected observation.
 
@@ -104,7 +112,9 @@ env-computed one.
    the system prompt has the global/project context, skill descriptions,
    SYSTEM/APPEND (added when targets are missing); targets appeared next to
    the sources; no raw tags. The role comes from `initial` (in the live
-   `~/.pi/agent`: `preflight`).
+   `~/.pi/agent`: `preflight`). Before the first message switch the model or
+   the role (`ctrl+r`): the status shows `!`, and the first prompt already
+   carries the new values — the status is `✓` again.
 2. **`/reload`.** Edit `AGENTS.md.template` without applying: the next turn
    sees the previous text and the status shows `!`. Run
    `/reload`. Expectation: the target was rewritten before pi re-read it,
@@ -116,7 +126,8 @@ env-computed one.
    a `"var"` record; no other records.
 4. **Apply button.** "update current session context". Expectation: targets
    rewritten, the next turn sees the new text (including the role text for
-   the new `role` value), the status is "up to date".
+   the new `role` value), the status is "up to date". The same action is on
+   `ctrl+alt+r`: one press instead of the menu.
 5. **Recompute one.** Enter on a computed variable. Expectation: the command
    is re-run, the value and age are updated; if the text changed the status
    is "stale" and applying is not automatic. A computed variable is not
@@ -145,9 +156,14 @@ env-computed one.
     between two starts reaches the catalog only at the next update.
 13. **Rewrite files on disk.** Change a variable in `/template` (the status
     becomes "stale"), then choose "rewrite files on disk". Expectation:
-    targets carry the current values, the status stays "stale", the session
-    keeps answering on the previous applied context, no session record is
-    added, the notification says `targets rewritten`.
+    targets carry the current values — the target of an include source
+    included (`roles/snippets/tests.md` appears next to
+    `roles/snippets/tests.md.template` with the rendered text), the status
+    stays "stale", the session keeps answering on the previous applied
+    context, no session record is added; the notification is the summary
+    (`targets rewritten — …`), the menu shows the report of the last rewrite
+    — one row per file with the status (`written`, `unchanged`, `failed` with
+    the reason, `not included` for a `.template` no template mentions).
 14. **Quick switch.** With a status variable declared (for example `role`
     with a value list of two or more): `ctrl+r` cycles its value — the
     status line shows `template ! role=<new value>`, a `"var"` record

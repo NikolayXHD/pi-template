@@ -8,10 +8,12 @@
  * - computed variables are calculated at start and on explicit menu
  *   commands; editing a source re-renders the current version without
  *   recomputing computed ones;
- * - there are no automatic applies: the applied version changes only at
- *   session start, when the actual model is checked on the first turn, by
- *   the apply button (API for zone C) and by `/reload` (writing the current
- *   version on `session_shutdown` before pi re-reads the target files);
+ * - the applied version is fixed at the first prompt assembly (the start
+ *   apply: everything that changed since the session start enters the first
+ *   prompt) and after it changes only by explicit action — the apply button
+ *   (API for zone C), the `ctrl+alt+r` shortcut and `/reload` (writing the
+ *   current version on `session_shutdown` before pi re-reads the target
+ *   files);
  * - foreign reads (read tool, spawn, catalog) run under a lock and get
  *   the applied version variant; a render failure does not rewrite the
  *   target file (last-success cache), and a loud warning names the reason;
@@ -26,12 +28,21 @@ import { type AgentFilePreliminary, type HeaderParser, renderAgentFile, splitThi
 import { agentNameFromPrompt, agentNameFromSessionName, hasActiveAgentTag } from "./identity.ts";
 import { type LockHandle, acquireLock, releaseLock, writeTargetUnderLock } from "./lock.ts";
 import {
+	type RenderFailure,
 	type SubagentRenderView,
 	agentNameOf,
 	renderSource,
 	renderSources,
 } from "./render-set.ts";
-import { CONTEXT_CANDIDATES, type TemplateSource, createPartialResolver, discoverSources } from "./sources.ts";
+import {
+	CONTEXT_CANDIDATES,
+	PROJECT_PREFIX,
+	type TemplateSource,
+	createPartialResolver,
+	discoverIncludeSources,
+	discoverSources,
+} from "./sources.ts";
+import type { RewriteFileReport, RewriteReport } from "./ui-model.ts";
 import { ContextVersions, type ContextVersion, sourceStamps, stampsDiffer } from "./versions.ts";
 import {
 	IMPLICIT_VARIABLE_NAMES,
@@ -160,6 +171,12 @@ export class TemplateSession {
 	private warnings: string[] = [];
 
 	private sources: TemplateSource[] = [];
+	/** Include sources: mentioned `X.template` files — their targets are written like any others. */
+	private includeSources: TemplateSource[] = [];
+	/** Both candidates of every mentioned include name. */
+	private includePaths: string[] = [];
+	/** `.template` files nothing mentions — no target, the rewrite report names them. */
+	private notIncluded: string[] = [];
 	/** Files of the includes the last current-version render read (or tried). */
 	private partialPaths: string[] = [];
 	private stamps: Record<string, string> = {};
@@ -167,6 +184,10 @@ export class TemplateSession {
 	private configStamps: Record<string, string> = {};
 	/** Problems of the last render pass (per-file failures). */
 	private lastRenderProblems: readonly string[] = [];
+	/** Failures of the last render pass, per file — the rewrite report. */
+	private lastRenderFailures: readonly RenderFailure[] = [];
+	/** The last "rewrite files on disk" report — the menu block. */
+	private lastRewrite: RewriteReport | undefined;
 	private startupTexts: Record<string, string> = {};
 	/** Sections pi actually loaded for SYSTEM/APPEND — "ours/foreign" recognition. */
 	private piLoadedSections: { customPrompt?: string; appendSystemPrompt?: string } | undefined;
@@ -261,7 +282,7 @@ export class TemplateSession {
 		const { sources, problems } = this.discoverInputsOnce();
 		this.sources = sources;
 		this.noteProblems(problems);
-		this.startupTexts = this.readTargetTexts();
+		this.startupTexts = this.readTargetTexts(this.sources);
 		this.configStamps = sourceStamps([this.configPath()]);
 		this.rememberStamps();
 	}
@@ -332,13 +353,21 @@ export class TemplateSession {
 		const current = this.versions.current;
 		if (this.startReason === "reload") {
 			// pi has already re-read the target files; delivery is not needed, the
-			// current version exists for status and future applies.
-			this.versions.setApplied({ texts: { ...this.startupTexts }, view: { ...this.view } });
+			// current version exists for status and future applies. Include targets
+			// are not in the startup snapshot — their sources are known only with
+			// the view — so their disk text joins it here, still unwritten.
+			this.versions.setApplied({
+				texts: { ...this.startupTexts, ...this.readTargetTexts(this.includeSources) },
+				view: { ...this.view },
+			});
 			this.applied = { ...this.view };
 			this.pendingDelivery = false;
 			return;
 		}
 		if (current === null) return;
+		// The applied version is the baseline of the `!` mark — what the session
+		// had at start. The start apply fixes it at the first prompt assembly
+		// (`startApply`): changes before that enter the first prompt by themselves.
 		this.versions.applyCurrent();
 		this.applied = { ...this.view };
 		this.pendingDelivery = true;
@@ -347,9 +376,10 @@ export class TemplateSession {
 
 	/** Re-render the current version under the current view (without recomputing computed). */
 	private async renderCurrent(): Promise<void> {
+		this.refreshIncludeSources();
 		const partials = createPartialResolver(this.agentDir, this.projectDir);
 		const report = await renderSources(
-			this.sources,
+			[...this.sources, ...this.includeSources],
 			{
 				view: this.view,
 				variables: this.values,
@@ -363,9 +393,29 @@ export class TemplateSession {
 		this.partialPaths = [...partials.paths];
 		this.rememberStamps();
 		this.lastRenderProblems = report.problems;
+		this.lastRenderFailures = report.failures;
 		this.noteProblems(report.problems);
 		this.noteWarnings(report.warnings);
 		this.versions.setCurrent({ texts: report.texts, view: { ...this.view } });
+	}
+
+	/**
+	 * Include sources of the templates: a name is mentioned by a static tag or
+	 * by a dynamic one — for every value of the variable value lists.
+	 */
+	private refreshIncludeSources(): void {
+		const problems: string[] = [];
+		const discovery = discoverIncludeSources({
+			sources: this.sources,
+			agentDir: this.agentDir,
+			projectDir: this.projectDir,
+			variables: this.values,
+			problems,
+		});
+		this.includeSources = discovery.sources;
+		this.includePaths = discovery.paths;
+		this.notIncluded = discovery.notIncluded;
+		this.noteProblems(problems);
 	}
 
 	private childRenderView(
@@ -445,24 +495,29 @@ export class TemplateSession {
 			}
 		}
 		if (!(await this.ensureStarted(host))) return;
-		if (this.pendingDelivery) {
-			// Start apply: the current version was fixed back in finishStart; the
-			// actual model check is the second (and last) reason to move it.
-			const corrected = await this.checkActualModel(host);
-			if (corrected) {
-				this.versions.applyCurrent();
-				this.applied = { ...this.view };
-			}
-			const applied = this.versions.applied;
-			if (applied !== null) this.writeVersion(applied);
-			this.pendingDelivery = false;
-		}
-		// Source comparison runs after applying: editing a source in this same
-		// turn marks the context stale but is not applied to the prompt. A
-		// config edit is picked up the same way.
+		// Source and config comparison runs before the start apply and before the
+		// delivery: an edit in this same turn is part of what the first prompt
+		// sees, and marks the context stale on the next ones.
 		await this.refreshConfig();
 		await this.refreshSources();
+		if (this.pendingDelivery) await this.startApply(host);
 		this.deliver(event.systemPromptOptions);
+	}
+
+	/**
+	 * Start apply: the applied version is fixed at the first prompt assembly —
+	 * whatever changed since the session start (model/level, variables, source
+	 * and config edits) enters the first prompt. Before it there is no
+	 * conversation and no cache to lose; after it applying is an explicit
+	 * action.
+	 */
+	private async startApply(host: TemplateSessionHost): Promise<void> {
+		await this.adoptActualModel(host);
+		this.versions.applyCurrent();
+		this.applied = { ...this.view };
+		this.pendingDelivery = false;
+		const applied = this.versions.applied;
+		if (applied !== null) this.writeVersion(applied);
 	}
 
 	/** Model/level change during the session: re-render the current version, do not apply. */
@@ -496,23 +551,24 @@ export class TemplateSession {
 		if (this.started && this.config !== undefined) await this.buildView(host);
 	}
 
-	private async checkActualModel(host: TemplateSessionHost): Promise<boolean> {
-		if (!host.model || !host.level) return false;
-		if (host.model === this.view.model && host.level === this.view.level) return false;
-		// CLI flags are not part of the startup view: the actual model re-renders
-		// the current version and is delivered by the same section replacement.
+	/**
+	 * Actual model/level of the host enter the view: the CLI flags are not part
+	 * of the startup view and have no `model_select` event.
+	 */
+	private async adoptActualModel(host: TemplateSessionHost): Promise<void> {
+		if (!host.model || !host.level) return;
+		if (host.model === this.view.model && host.level === this.view.level) return;
 		this.view.model = host.model;
 		this.view.level = host.level;
 		this.childViews.clear();
 		this.refreshExpressions();
 		await this.renderCurrent();
-		return true;
 	}
 
 	private async refreshSources(): Promise<boolean> {
 		const { sources, problems } = this.discoverInputsOnce();
 		this.noteProblems(problems);
-		const paths = [...sources.map((source) => source.source), ...this.partialPaths];
+		const paths = [...sources.map((source) => source.source), ...this.includePaths, ...this.partialPaths];
 		const stamps = sourceStamps(paths);
 		if (!stampsDiffer(this.stamps, stamps)) return false;
 		this.sources = sources;
@@ -521,7 +577,11 @@ export class TemplateSession {
 	}
 
 	private rememberStamps(): void {
-		this.stamps = sourceStamps([...this.sources.map((source) => source.source), ...this.partialPaths]);
+		this.stamps = sourceStamps([
+			...this.sources.map((source) => source.source),
+			...this.includePaths,
+			...this.partialPaths,
+		]);
 	}
 
 	private readTargetText(target: string): string | undefined {
@@ -532,30 +592,54 @@ export class TemplateSession {
 		}
 	}
 
-	private readTargetTexts(): Record<string, string> {
+	private readTargetTexts(sources: readonly TemplateSource[]): Record<string, string> {
 		const texts: Record<string, string> = {};
-		for (const source of this.sources) {
+		for (const source of sources) {
 			const text = this.readTargetText(source.target);
 			if (text !== undefined) texts[source.target] = text;
 		}
 		return texts;
 	}
 
-	/** Write a version to the target files: only on a text mismatch, atomically. */
-	private writeVersion(version: ContextVersion): number {
-		let changed = 0;
+	/**
+	 * Write a version to the target files: only on a text mismatch, atomically.
+	 * The report names every file — written, unchanged or failed with the reason.
+	 */
+	private writeVersion(version: ContextVersion): RewriteFileReport[] {
+		const files: RewriteFileReport[] = [];
 		for (const [target, text] of Object.entries(version.texts)) {
-			if (this.readTargetText(target) === text) continue;
+			const path = this.displayPath(target);
+			if (this.readTargetText(target) === text) {
+				files.push({ path, status: "unchanged" });
+				continue;
+			}
 			try {
 				const temporary = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
 				writeFileSync(temporary, text);
 				renameSync(temporary, target);
-				changed += 1;
+				files.push({ path, status: "written" });
 			} catch (error) {
-				this.warn(`target ${target} not written: ${errorMessage(error)}`);
+				const problem = errorMessage(error);
+				this.warn(`target ${target} not written: ${problem}`);
+				files.push({ path, status: "failed", detail: problem });
 			}
 		}
-		return changed;
+		files.sort((a, b) => (a.path < b.path ? -1 : 1));
+		return files;
+	}
+
+	/**
+	 * Display path of a file: an include-style name from the agent root (the
+	 * `.pi/…` name for the project include root), absolute otherwise.
+	 */
+	private displayPath(path: string): string {
+		const resolved = resolve(path);
+		const projectIncludeRoot = join(resolve(this.projectDir), ".pi");
+		if (resolved.startsWith(`${this.agentDir}${sep}`)) return resolved.slice(this.agentDir.length + 1);
+		if (resolved.startsWith(`${projectIncludeRoot}${sep}`)) {
+			return `${PROJECT_PREFIX}${resolved.slice(projectIncludeRoot.length + 1)}`;
+		}
+		return resolved;
 	}
 
 	/**
@@ -570,13 +654,27 @@ export class TemplateSession {
 	private deliver(options: PromptSections): void {
 		const applied = this.versions.applied;
 		if (applied === null) return;
-		const appliedTexts = normalizedTexts(applied.texts);
+		const appliedTexts = normalizedTexts(this.deliveryTexts(applied.texts));
 		this.deliverContextFiles(options, appliedTexts);
 		this.deliverSkills(options, appliedTexts);
 		const customPrompt = this.systemSection("SYSTEM.md", options.customPrompt, appliedTexts);
 		if (customPrompt !== undefined) options.customPrompt = customPrompt;
 		const appendSystemPrompt = this.systemSection("APPEND_SYSTEM.md", options.appendSystemPrompt, appliedTexts);
 		if (appendSystemPrompt !== undefined) options.appendSystemPrompt = appendSystemPrompt;
+	}
+
+	/**
+	 * Texts pi consumes: the targets of the discovered sources. Include targets
+	 * are written artifacts only — pi never loads them, and their text is
+	 * already inside the target of the includer.
+	 */
+	private deliveryTexts(texts: Readonly<Record<string, string>>): Record<string, string> {
+		const targets = new Set(this.sources.map((source) => resolve(source.target)));
+		const delivered: Record<string, string> = {};
+		for (const [path, text] of Object.entries(texts)) {
+			if (targets.has(resolve(path))) delivered[path] = text;
+		}
+		return delivered;
 	}
 
 	/** Context files: replacing our records plus adding missing ones. */
@@ -777,7 +875,9 @@ export class TemplateSession {
 	async openReadBracket(targetPath: string): Promise<TargetBracket | null> {
 		if (!this.started || this.versions.applied === null) return null;
 		const target = resolve(targetPath);
-		const source = this.sources.find((entry) => resolve(entry.target) === target);
+		const source = [...this.sources, ...this.includeSources].find(
+			(entry) => resolve(entry.target) === target,
+		);
 		if (source === undefined) return null;
 		for (let attempt = 0; attempt < 2; attempt += 1) {
 			const handle = await acquireLock(target, {
@@ -974,6 +1074,11 @@ export class TemplateSession {
 		return this.warnings;
 	}
 
+	/** Report of the last "rewrite files on disk" — the menu block. */
+	lastRewriteReport(): RewriteReport | undefined {
+		return this.lastRewrite;
+	}
+
 	computedAge(name: string): number | undefined {
 		const at = this.computedAt[name];
 		return at === undefined ? undefined : this.now() - at;
@@ -994,13 +1099,49 @@ export class TemplateSession {
 	 * Rewrite files button: target files on disk get the current version. There
 	 * is no apply — versions, the applied context and session records are not
 	 * touched; if the target files have run ahead of memory that is the normal
-	 * "prompts are stale" (fixed by the apply button or a pi reload). The
-	 * report says how many files changed and which failed to render.
+	 * "prompts are stale" (fixed by the apply button or a pi reload). The report
+	 * names every file: written, unchanged, failed with the reason, and the
+	 * `.template` files nothing includes — those have no target to write. It is
+	 * kept as the last rewrite — the menu block reads it.
 	 */
-	rewriteFiles(): { ok: boolean; changed: number; problems: readonly string[] } {
+	rewriteFiles(): RewriteReport {
 		const current = this.versions.current;
-		if (!this.started || current === null) return { ok: false, changed: 0, problems: this.lastRenderProblems };
-		return { ok: true, changed: this.writeVersion(current), problems: this.lastRenderProblems };
+		if (!this.started || current === null) {
+			const report: RewriteReport = {
+				ok: false,
+				changed: 0,
+				problems: this.lastRenderProblems,
+				files: [],
+			};
+			this.lastRewrite = report;
+			return report;
+		}
+		const files = this.writeVersion(current);
+		for (const failure of this.lastRenderFailures) {
+			const path = this.displayPath(failure.target);
+			const entry = files.find((file) => file.path === path);
+			if (entry === undefined) files.push({ path, status: "failed", detail: failure.problem });
+			else {
+				entry.status = "failed";
+				entry.detail = failure.problem;
+			}
+		}
+		for (const source of this.notIncluded) {
+			files.push({
+				path: this.displayPath(source),
+				status: "not included",
+				detail: "not mentioned by any template — no target is written",
+			});
+		}
+		files.sort((a, b) => (a.path < b.path ? -1 : 1));
+		const report: RewriteReport = {
+			ok: true,
+			changed: files.filter((file) => file.status === "written").length,
+			problems: this.lastRenderProblems,
+			files,
+		};
+		this.lastRewrite = report;
+		return report;
 	}
 
 	/** Session variable change: the current version is re-rendered, not applied. */

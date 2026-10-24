@@ -24,9 +24,10 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
+import { collectIncludeNames } from "./render.ts";
 import type { PartialResolver } from "./render.ts";
 
-export type SourceKind = "context" | "system" | "append" | "skill" | "prompt" | "agent";
+export type SourceKind = "context" | "system" | "append" | "skill" | "prompt" | "agent" | "include";
 
 export interface TemplateSource {
 	/** Absolute path of the `X.template` source. */
@@ -208,6 +209,110 @@ export function discoverSources(
 }
 
 /**
+ * Include sources and the files nothing includes.
+ *
+ * A `.template` file is an include source when a template mentions its name
+ * — a static one, a dynamic one for every value of the variable value lists
+ * — directly or through another include. Its target `X` is written like the
+ * target of any other source; a name that resolves to a plain `X` (no
+ * `X.template`) is hand-written and is never ours.
+ *
+ * `notIncluded` — `.template` files of the directories that hold sources and
+ * includes and are mentioned nowhere: no target exists for them, and the
+ * rewrite report names them. The candidates of every mentioned name (`X.template`,
+ * `X`) go to `paths`: the session stamps them, so an edit, an appearance or a
+ * removal marks the context stale.
+ */
+export interface IncludeDiscoveryOptions {
+	/** Sources the includes are followed from. */
+	sources: readonly TemplateSource[];
+	agentDir: string;
+	projectDir: string;
+	/** Variable name → known value list — a dynamic include name resolves over it. */
+	variables: Record<string, string[] | undefined>;
+	/** Problems: a template text that cannot be read or parsed. */
+	problems?: string[];
+}
+
+export interface IncludeDiscovery {
+	/** Include sources: mentioned `X.template` files. */
+	sources: TemplateSource[];
+	/** Both candidates of every mentioned include name. */
+	paths: string[];
+	/** `.template` files no template mentions — no target is written for them. */
+	notIncluded: string[];
+}
+
+export function discoverIncludeSources(options: IncludeDiscoveryOptions): IncludeDiscovery {
+	const bySource = new Map<string, TemplateSource>();
+	const paths = new Set<string>();
+	const visited = new Set<string>();
+	const queue = options.sources.map((source) => source.source);
+	while (queue.length > 0) {
+		const path = queue.pop() as string;
+		if (visited.has(path)) continue;
+		visited.add(path);
+		for (const name of includeNamesOf(path, options, options.problems)) {
+			const pair = includePair(resolve(options.agentDir), resolve(options.projectDir), name);
+			if (pair === undefined) continue;
+			for (const candidate of pair) paths.add(candidate);
+			const [sourcePath, target] = pair;
+			if (!isFile(sourcePath) || bySource.has(sourcePath)) continue;
+			bySource.set(sourcePath, { source: sourcePath, target, kind: "include" });
+			queue.push(sourcePath);
+		}
+	}
+	return {
+		sources: [...bySource.values()].sort((a, b) => (a.source < b.source ? -1 : 1)),
+		paths: [...paths].sort(),
+		notIncluded: notIncludedFiles(options, paths, new Set(bySource.keys())),
+	};
+}
+
+/** Include names of one template file; a text that cannot be read or parsed is a problem. */
+function includeNamesOf(
+	path: string,
+	options: IncludeDiscoveryOptions,
+	problems: string[] | undefined,
+): string[] {
+	let text: string;
+	try {
+		text = readFileSync(path, "utf-8");
+	} catch (error) {
+		problems?.push(`${path}: source cannot be read: ${errorMessage(error)}`);
+		return [];
+	}
+	const collected = collectIncludeNames(text, options.variables);
+	if (collected.problem !== null) {
+		problems?.push(`${path}: ${collected.problem}`);
+		return [];
+	}
+	return collected.names;
+}
+
+/** `.template` files of the directories of sources and includes that nothing mentions. */
+function notIncludedFiles(
+	options: IncludeDiscoveryOptions,
+	mentionedPaths: ReadonlySet<string>,
+	includeSources: ReadonlySet<string>,
+): string[] {
+	const known = new Set([...options.sources.map((source) => source.source), ...includeSources]);
+	const dirs = new Set<string>();
+	for (const source of options.sources) dirs.add(dirname(source.source));
+	for (const path of mentionedPaths) dirs.add(dirname(path));
+	const found: string[] = [];
+	for (const dir of [...dirs].sort()) {
+		for (const entry of readDirEntries(dir, options.problems)) {
+			if (!entry.name.endsWith(TEMPLATE_SUFFIX)) continue;
+			const path = join(dir, entry.name);
+			if (known.has(path) || !isFile(path)) continue;
+			found.push(path);
+		}
+	}
+	return found.sort();
+}
+
+/**
  * Include resolver over the two roots: the name is a path from the root of
  * its directory — the agent directory without a prefix, the project root
  * with the `.pi/` prefix. The text comes from `X.template` when present,
@@ -224,7 +329,7 @@ export interface DiskPartialResolver extends PartialResolver {
 }
 
 /** Include name of the project root: the `.pi/` prefix in the name. */
-const PROJECT_PREFIX = ".pi/";
+export const PROJECT_PREFIX = ".pi/";
 
 /** Candidate files of an include name; `undefined` — the name escapes its root. */
 function includePair(agentRoot: string, projectRoot: string, name: string): [string, string] | undefined {

@@ -20,9 +20,9 @@
  *
  * Zone C: session overrides are read from `"var"` records at start
  * (resume) and written by the `/template` command; the `ctrl+r`/`alt+r`
- * shortcuts cycle the status variable value and the variable itself. The
- * status line is updated at start, on every turn and on explicit menu
- * actions and shortcuts.
+ * shortcuts cycle the status variable value and the variable itself,
+ * `ctrl+alt+r` applies the current version. The status line is updated at
+ * start, on every turn and on explicit menu actions and shortcuts.
  *
  * External CLI and machine runs stay as in the design: registration
  * without `requireForAllRunners`, nothing is bypassed or masked.
@@ -40,7 +40,15 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { releaseLock } from "./lock.ts";
 import { type TargetBracket, TemplateSession, type TemplateSessionHost } from "./session.ts";
-import { type TemplateUiDeps, clearTemplateStatus, cycleStatusVariable, cycleStatusVariableValue, registerTemplateCommand, updateTemplateStatus } from "./ui.ts";
+import {
+	type TemplateUiDeps,
+	applyCurrentContext,
+	clearTemplateStatus,
+	cycleStatusVariable,
+	cycleStatusVariableValue,
+	registerTemplateCommand,
+	updateTemplateStatus,
+} from "./ui.ts";
 import { readVarOverrides } from "./ui-model.ts";
 
 /** Extension id in the pi-subagents required extensions registry. */
@@ -296,6 +304,10 @@ export default function piTemplate(pi: ExtensionAPI): void {
 	pi.registerShortcut("alt+r", {
 		description: "pi-template: cycle the status variable",
 		handler: (ctx) => cycleStatusVariable(deps, ctx),
+	});
+	pi.registerShortcut("ctrl+alt+r", {
+		description: "pi-template: apply the current context",
+		handler: (ctx) => applyCurrentContext(deps, ctx),
 	});
 }
 

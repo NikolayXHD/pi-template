@@ -9,9 +9,12 @@ environment, or a shell command.
 ## How it works
 
 - A **source** is an `X.template` file, the only file edited by hand. A
-  **target** is the rendered copy `X` next to the source. pi finds targets
-  natively (`AGENTS.md`, `SKILL.md`, `*.md` prompts, `SYSTEM.md`,
-  `APPEND_SYSTEM.md`); none of its mechanisms sees `.template` files.
+  **target** is the rendered copy `X` next to the source. Sources are the
+  files pi consumes natively (`AGENTS.md`, `SKILL.md`, `*.md` prompts,
+  `SYSTEM.md`, `APPEND_SYSTEM.md`) and **include sources** — `X.template`
+  files a template mentions as a partial; the target of an include source is
+  the rendered copy to read, pi never loads it. None of pi's mechanisms sees
+  `.template` files.
 - At start a session computes the **view** — the full set of variable
   values — and renders the targets. The current context version is kept in
   memory and delivered into the prompt by pointwise section replacement;
@@ -63,9 +66,11 @@ agent directory:
 ```
 
 The partial name is the plain name (`modes/plan.md`), resolved on disk
-at render time; the text is read from the source `modes/plan.md.template` —
-mode files have no target and are never written to. Adding a mode is
-dropping a file into `modes/`.
+at render time; the text is read from the source `modes/plan.md.template`
+when it is present, otherwise from `modes/plan.md`. Adding a mode is
+dropping a file into `modes/`. Every mentioned `X.template` — mode files
+included — is an include source: its target `X` is written next to it, and
+a plain `X` without a source is hand-written and never overwritten.
 
 ## Installation
 
@@ -168,7 +173,10 @@ error, not a silent rejection:
   the root of its directory (agent ones from the agent directory, project
   ones from the project root with the `.pi/` prefix). The name is resolved
   on disk at render time: the text comes from `X.template` when
-  present, otherwise from `X`. There is no pre-scan of directories, so an
+  present, otherwise from `X`. A mentioned `X.template` is an include source
+  — its target `X` carries the rendered text (nested includes expanded); a
+  `.template` that no template mentions has no target, and the rewrite
+  report names it. There is no pre-scan of directories, so an
   include from an arbitrary directory (`{{> modes/plan.md}}`) resolves like
   any other; a name that escapes its root is not resolved. A missing static
   name is a lint error; a missing value of a dynamic partial is a warning,
@@ -214,13 +222,17 @@ The extension's only command opens the context management menu:
   level), so their status matters like any other's;
 - "recompute all variables";
 - "rewrite files on disk" — writing the current version into the targets
-  without applying it; the notification says how many files changed, that
-  nothing changed, or which files failed to render;
+  without applying it. The notification is the summary (how many written,
+  unchanged, failed); the menu keeps the report of the last rewrite — one
+  row per file: `written`, `unchanged`, `failed` with the reason, or
+  `not included` — a `.template` no template mentions, so no target exists
+  for it;
 - "update current session context" — applying the current version.
 
 The file buttons follow the workflow: rewrite first, read the files if you
-like, then apply to the session context. An action does not close the menu —
-the actions are granular and several in a row is the usual case; Esc does.
+like, then apply to the session context — the button or `ctrl+alt+r`. An
+action does not close the menu — the actions are granular and several in a
+row is the usual case; Esc does.
 
 A variable change is recorded in the
 session (`customType: "var"`, payload `{name, value}`) and does not update
@@ -231,7 +243,8 @@ The quick switch cycles values without the menu: `ctrl+r` takes the next
 value of the status variable, `alt+r` takes the next variable of the ring —
 declared ones with a non-empty value list. A value change is a session
 override, exactly as a menu change: the context is not applied; `alt+r`
-writes its choice into `template.json` immediately. In pi `ctrl+r` is the
+writes its choice into `template.json` immediately. `ctrl+alt+r` applies the
+current version — the button action without the menu. In pi `ctrl+r` is the
 built-in "rename session" shortcut; the extension overrides it — pi reports
 the conflict on startup.
 
@@ -249,11 +262,15 @@ The extension keeps two versions of the context files in memory: the
 - Editing a source or an included file, changing a session variable or the
   model/level re-renders only the current version and marks the context
   stale: the prompt itself never changes.
-- Applying is explicit only: session start, `/reload`, the "update current
-  session context" button. Start and the button deliver the text by
-  pointwise section replacement; `/reload` re-reads the targets by pi itself
-  (the extension writes the current version on `session_shutdown`). "Rewrite
-  files on disk" writes the targets without applying anything.
+- The applied version is fixed at the first prompt assembly: everything that
+  changed since the session start (a variable, model/level, a source or
+  config edit) enters the first prompt by itself — before it there is no
+  conversation and no cache to lose. After it applying is explicit: the
+  "update current session context" button or `ctrl+alt+r`. The start apply
+  and the button deliver the text by pointwise section replacement;
+  `/reload` re-reads the targets by pi itself (the extension writes the
+  current version on `session_shutdown`). "Rewrite files on disk" writes the
+  targets without applying anything.
 - Sources and the files of the last render's includes are compared by
   `mtime`+`size` on every turn; shell computations run only by explicit
   menu actions, `compute` expressions are re-derived on every view change

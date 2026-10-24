@@ -46,7 +46,7 @@ import { agentNameFromPrompt, agentNameFromSessionName } from "./identity.ts";
 import { LOCK_TTL_MS, acquireLock, ownsLock, releaseLock, writeTargetUnderLock } from "./lock.ts";
 import { renderSources } from "./render-set.ts";
 import { collectSpawnTargets, TemplateSession } from "./session.ts";
-import { createPartialResolver, discoverSources } from "./sources.ts";
+import { createPartialResolver, discoverIncludeSources, discoverSources } from "./sources.ts";
 import {
 	changeVariable,
 	formatAge,
@@ -56,6 +56,8 @@ import {
 	nextStatusVariable,
 	nextVariableValue,
 	readVarOverrides,
+	rewriteRowText,
+	rewriteSummaryText,
 	statusLineText,
 	statusVariableChoices,
 	variableFacts,
@@ -1810,6 +1812,60 @@ scenario("when_include_name_then_resolved_on_disk", async () => {
 	});
 });
 
+scenario("when_include_sources_discovered_then_targets_and_not_included", async () => {
+	await withTempTree(async ({ agentDir, projectDir, write }) => {
+		write("agent/AGENTS.md.template", '{{> (concat "roles/" role ".md")}}\n{{> ".pi/snippets/extra.md"}}');
+		write("agent/roles/plan.md.template", "Plan {{who}}\n{{> roles/snippets/tests.md}}\n{{> roles/snippets/review.md}}");
+		write("agent/roles/code.md.template", "Code {{who}}");
+		write("agent/roles/snippets/tests.md.template", "Tests {{who}}");
+		write("agent/roles/snippets/review.md", "Review plain");
+		write("agent/roles/snippets/orphan.md.template", "Orphan");
+		write("project/.pi/snippets/extra.md.template", "Extra {{who}}");
+		write("agent/prompts/p.md.template", "Prompt");
+		const sources = discoverSources(agentDir, projectDir);
+		const problems = [];
+		const discovery = discoverIncludeSources({
+			sources,
+			agentDir,
+			projectDir,
+			variables: { role: ["plan", "code"], who: undefined },
+			problems,
+		});
+		assertEqual(problems, [], "include discovery problems");
+		assertEqual(
+			discovery.sources.map((source) => [source.kind, source.target]),
+			[
+				["include", join(agentDir, "roles", "code.md")],
+				["include", join(agentDir, "roles", "plan.md")],
+				["include", join(agentDir, "roles", "snippets", "tests.md")],
+				["include", join(projectDir, ".pi", "snippets", "extra.md")],
+			],
+			"include sources: a mentioned name with a source file, for every value of a dynamic one",
+		);
+		assertEqual(
+			discovery.paths,
+			[
+				join(agentDir, "roles", "code.md"),
+				join(agentDir, "roles", "code.md.template"),
+				join(agentDir, "roles", "plan.md"),
+				join(agentDir, "roles", "plan.md.template"),
+				join(agentDir, "roles", "snippets", "review.md"),
+				join(agentDir, "roles", "snippets", "review.md.template"),
+				join(agentDir, "roles", "snippets", "tests.md"),
+				join(agentDir, "roles", "snippets", "tests.md.template"),
+				join(projectDir, ".pi", "snippets", "extra.md"),
+				join(projectDir, ".pi", "snippets", "extra.md.template"),
+			],
+			"candidates of every mentioned name, plain includes included",
+		);
+		assertEqual(
+			discovery.notIncluded,
+			[join(agentDir, "roles", "snippets", "orphan.md.template")],
+			"a .template nothing mentions",
+		);
+	});
+});
+
 scenario("when_source_edited_then_stamps_differ", async () => {
 	await withTempDir(async (dir) => {
 		const path = join(dir, "x.md");
@@ -2071,6 +2127,12 @@ scenario("when_session_started_then_targets_written_and_delivered", async () => 
 		const target = join(agentDir, "AGENTS.md");
 		assertEqual(readFileSync(target, "utf-8"), "Hello world", "start did not write the target file");
 
+		const firstOptions = { contextFiles: [{ path: target, content: "Hello world" }] };
+		await session.beforeAgentStart({ systemPromptOptions: firstOptions }, host);
+		assertEqual(firstOptions.contextFiles[0].content, "Hello world", "the first prompt did not get the start version");
+		assertEqual(session.isStale(), false, "the first prompt assembly marked the context stale");
+
+		// After the first prompt assembly an edit waits for an explicit apply.
 		await new Promise((resolveWait) => setTimeout(resolveWait, 5));
 		write("agent/AGENTS.md.template", "Bye {{who}}!");
 		const appliedOptions = { contextFiles: [{ path: target, content: "Hello world" }] };
@@ -2246,6 +2308,51 @@ scenario("when_spawn_bracket_then_agent_target_rendered", async () => {
 	});
 });
 
+/** The first prompt assembly applies everything that changed since the session start. */
+scenario("when_changed_before_first_prompt_then_it_enters_the_first_prompt", async () => {
+	await withTempTree(async ({ agentDir, projectDir, write }) => {
+		write(
+			"agent/template.json",
+			JSON.stringify({ vars: { who: { initial: "world" }, is_flash: { compute: 'eq model "deepseek/flash"' } } }),
+		);
+		write("agent/AGENTS.md.template", "Hello {{who}}, flash {{is_flash}}");
+		const warnings = [];
+		const host = sessionHost(warnings, "deepseek/other", "max");
+		const session = makeSession({
+			agentDir,
+			projectDir,
+			parseHeader: simpleHeaderParser,
+			env: {},
+			execute: noShell,
+		});
+		await session.start(host, "startup");
+		const target = join(agentDir, "AGENTS.md");
+		assertEqual(readFileSync(target, "utf-8"), "Hello world, flash false", "startup target file");
+
+		// Before the first prompt: a variable change and a model switch.
+		assertEqual((await session.setVariable("who", "sun")).ok, true, "variable change failed");
+		assertEqual(session.isStale(), true, "a variable change before the first prompt did not mark the context stale");
+		await session.onModelChanged(sessionHost(warnings, "deepseek/flash", "max"));
+		assertEqual(session.isStale(), true, "a model switch before the first prompt did not mark the context stale");
+
+		// …and an edit of the source itself.
+		await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+		write("agent/AGENTS.md.template", "Bye {{who}}, flash {{is_flash}}");
+		assertEqual(session.isStale(), true, "a source edit before the first prompt did not mark the context stale");
+
+		const options = { contextFiles: [{ path: target, content: readFileSync(target, "utf-8") }] };
+		await session.beforeAgentStart({ systemPromptOptions: options }, sessionHost(warnings, "deepseek/flash", "max"));
+		assertEqual(
+			options.contextFiles[0].content,
+			"Bye sun, flash true",
+			"the first prompt did not carry the changes made before it",
+		);
+		assertEqual(readFileSync(target, "utf-8"), "Bye sun, flash true", "the targets did not take the changes made before the first prompt");
+		assertEqual(session.isStale(), false, "the first prompt assembly left the context stale");
+		session.shutdown("quit");
+	});
+});
+
 /** Session variable change and recompute: explicit actions without applying. */
 scenario("when_session_variable_changed_then_stale_without_apply", async () => {
 	await withTempTree(async ({ agentDir, projectDir, write }) => {
@@ -2356,6 +2463,7 @@ scenario("when_reload_shutdown_then_current_written", async () => {
 			execute: noShell,
 		});
 		await session.start(sessionHost(warnings), "startup");
+		await session.beforeAgentStart({ systemPromptOptions: {} }, sessionHost(warnings));
 		await new Promise((resolveWait) => setTimeout(resolveWait, 5));
 		write("agent/AGENTS.md.template", "Bye {{who}}!");
 		await session.beforeAgentStart({ systemPromptOptions: {} }, sessionHost(warnings));
@@ -2832,6 +2940,7 @@ scenario("when_config_changes_then_view_rebuilt_on_refresh", async () => {
 		const warnings = [];
 		await session.start(sessionHost(warnings), "startup");
 		assertEqual(session.currentView().is_flash, undefined, "a variable appeared without the config");
+		await session.beforeAgentStart({ systemPromptOptions: {} }, sessionHost(warnings));
 
 		// The config gains a variable mid-session: the view follows without a restart.
 		write(
@@ -3191,6 +3300,107 @@ scenario("when_rewrite_files_then_targets_fresh_versions_untouched", async () =>
 		assertEqual(readFileSync(target, "utf-8"), "Hello sun", "repeated rewrite corrupted the target file");
 		session.shutdown("quit");
 	});
+});
+
+/** The include source target: the rendered copy next to the source, the plain include untouched. */
+scenario("when_include_source_then_target_written_next_to_it", async () => {
+	await withTempTree(async ({ agentDir, projectDir, write }) => {
+		write("agent/template.json", JSON.stringify({ vars: { who: { initial: "world" } } }));
+		write("agent/AGENTS.md.template", "Hello {{who}}\n{{> roles/snippets/tests.md}}");
+		write("agent/roles/snippets/tests.md.template", '{{#if (eq who "sun")}}flash rules{{else}}plain rules{{/if}}');
+		write("agent/roles/snippets/review.md", "hand-written");
+		const warnings = [];
+		const session = makeSession({ agentDir, projectDir });
+		await session.start(sessionHost(warnings), "startup");
+		await session.beforeAgentStart({ systemPromptOptions: {} }, sessionHost(warnings));
+		const includeTarget = join(agentDir, "roles", "snippets", "tests.md");
+		assertEqual(readFileSync(includeTarget, "utf-8"), "plain rules", "include target at start");
+		assertEqual(
+			readFileSync(join(agentDir, "AGENTS.md"), "utf-8"),
+			"Hello world\nplain rules",
+			"the includer target carries the same include text",
+		);
+		assertEqual(
+			readFileSync(join(agentDir, "roles", "snippets", "review.md"), "utf-8"),
+			"hand-written",
+			"a plain include was rewritten",
+		);
+
+		assertEqual((await session.setVariable("who", "sun")).ok, true, "variable change failed");
+		session.rewriteFiles();
+		assertEqual(readFileSync(includeTarget, "utf-8"), "flash rules", "include target not re-rendered");
+		session.shutdown("quit");
+	});
+});
+
+/** Rewrite report: every file with its status — written, unchanged, failed, not included. */
+scenario("when_rewrite_files_then_report_names_every_file", async () => {
+	await withTempTree(async ({ agentDir, projectDir, write }) => {
+		write("agent/template.json", JSON.stringify({ vars: { who: { initial: "world" } } }));
+		write("agent/AGENTS.md.template", "Hello {{who}}\n{{> roles/snippets/tests.md}}");
+		write("agent/roles/snippets/tests.md.template", "Tests {{who}}");
+		write("agent/roles/snippets/orphan.md.template", "Orphan");
+		write("agent/prompts/static.md.template", "Static text");
+		write("agent/prompts/bad.md.template", "{{> ghost.md}}");
+		const warnings = [];
+		const session = makeSession({ agentDir, projectDir });
+		await session.start(sessionHost(warnings), "startup");
+		await session.beforeAgentStart({ systemPromptOptions: {} }, sessionHost(warnings));
+		assertEqual((await session.setVariable("who", "sun")).ok, true, "variable change failed");
+
+		const report = session.rewriteFiles();
+		assertEqual(report.ok, true, "rewrite files failed");
+		assertEqual(report.changed, 2, "written file count");
+		assertEqual(
+			report.files.map((file) => [file.path, file.status]),
+			[
+				["AGENTS.md", "written"],
+				["prompts/bad.md", "failed"],
+				["prompts/static.md", "unchanged"],
+				["roles/snippets/orphan.md.template", "not included"],
+				["roles/snippets/tests.md", "written"],
+			],
+			"rewrite report statuses",
+		);
+		const failed = report.files.find((file) => file.status === "failed");
+		assert(failed.detail.includes("ghost.md"), `failure reason not named: ${failed.detail}`);
+		const notIncluded = report.files.find((file) => file.status === "not included");
+		assert(notIncluded.detail.includes("not mentioned"), `not included reason not named: ${notIncluded.detail}`);
+		assertEqual(report.problems.length, 1, "render problems of the report");
+		session.shutdown("quit");
+	});
+});
+
+/** Rewrite report text: counts per status and one row per file. */
+scenario("when_rewrite_report_summarized_then_counts_per_status", async () => {
+	const report = {
+		ok: true,
+		changed: 2,
+		problems: [],
+		files: [
+			{ path: "AGENTS.md", status: "written" },
+			{ path: "roles/snippets/tests.md", status: "written" },
+			{ path: "prompts/static.md", status: "unchanged" },
+			{ path: "prompts/bad.md", status: "failed", detail: 'partial "ghost.md" not found' },
+			{
+				path: "roles/snippets/orphan.md.template",
+				status: "not included",
+				detail: "not mentioned by any template — no target is written",
+			},
+		],
+	};
+	assertEqual(
+		rewriteSummaryText(report),
+		"2 written, 1 unchanged, 1 failed, 1 not included",
+		"rewrite summary",
+	);
+	assertEqual(rewriteRowText(report.files[0]), "written · AGENTS.md", "written row");
+	assertEqual(
+		rewriteRowText(report.files[3]),
+		'failed · prompts/bad.md — partial "ghost.md" not found',
+		"failed row",
+	);
+	assertEqual(rewriteSummaryText({ ok: true, changed: 0, problems: [], files: [] }), "no files", "empty summary");
 });
 
 /** Value age: seconds, minutes, hours, days. */

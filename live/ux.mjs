@@ -232,9 +232,17 @@ state.component.handleInput("\x1b");
 await tuiRun;
 check(state.notifications.at(-1)?.message.includes("branch = main"), "TUI menu: Esc closed without actions");
 
-// Source edit: before_agent_start marks "stale", applied by the button.
+// Source edit: before_agent_start marks "stale", applied by the button. The
+// first prompt assembly comes first — after it applying is explicit.
 runner.setUIContext(ui, "rpc");
 await new Promise((resolve) => setTimeout(resolve, 10));
+await runner.emit({
+	type: "before_agent_start",
+	messageType: "user",
+	prompt: "hello",
+	systemPrompt: "",
+	systemPromptOptions: {},
+});
 writeFileSync(join(env.projectDir, "AGENTS.md.template"), "Role {{role}}; edit {{branch}}");
 const sections = {};
 await runner.emit({
@@ -496,6 +504,66 @@ check(
 rewriteSession.session.dispose();
 rmSync(rewriteRoot, { recursive: true, force: true });
 
+// ——— Include targets and the rewrite report ———
+const includeRoot = mkdtempSync(join(tmpdir(), "pi-template-include-"));
+process.env.PI_CODING_AGENT_DIR = join(includeRoot, "agent");
+const includeEnv = await makeEnvironment(includeRoot);
+const includeSnippets = join(includeEnv.agentDir, "roles", "snippets");
+mkdirSync(includeSnippets, { recursive: true });
+writeFileSync(join(includeSnippets, "tests.md.template"), "Tests {{role}}");
+writeFileSync(join(includeSnippets, "orphan.md.template"), "Orphan");
+writeFileSync(join(includeEnv.projectDir, "AGENTS.md.template"), "Role {{role}}\n{{> roles/snippets/tests.md}}");
+const includeUi = makeUi("rpc");
+const includeSession = await pi.createAgentSession({
+	cwd: includeEnv.projectDir,
+	agentDir: includeEnv.agentDir,
+	modelRuntime: includeEnv.modelRuntime,
+	model: includeEnv.model,
+	thinkingLevel: "low",
+	resourceLoader: includeEnv.loader,
+	sessionManager: includeEnv.sessionManager,
+	settingsManager: includeEnv.settingsManager,
+});
+await includeSession.session.bindExtensions({ uiContext: includeUi.ui, mode: "rpc" });
+const includeRunner = includeSession.session.extensionRunner;
+const includeCommand = () => includeRunner.getCommand("template");
+const includeContext = () => includeRunner.createCommandContext();
+const includeTarget = join(includeSnippets, "tests.md");
+check(
+	readFileSync(includeTarget, "utf-8") === "Tests preflight",
+	`include target at start: ${JSON.stringify(readFileSync(includeTarget, "utf-8"))}`,
+);
+
+// Variable change and the button: the target follows and the report names every file.
+includeUi.state.script.push("role = preflight", "develop");
+await includeCommand().handler("", includeContext());
+includeUi.state.script.push("rewrite files on disk");
+await includeCommand().handler("", includeContext());
+check(
+	readFileSync(includeTarget, "utf-8") === "Tests develop",
+	`include target rewritten: ${JSON.stringify(readFileSync(includeTarget, "utf-8"))}`,
+);
+check(
+	includeUi.state.notifications.at(-1)?.message === "pi-template: targets rewritten — 2 written, 1 not included",
+	`rewrite summary: ${JSON.stringify(includeUi.state.notifications.at(-1))}`,
+);
+
+// The report of the last rewrite stays in the menu.
+includeRunner.setUIContext(includeUi.ui, "tui");
+const includeTuiRun = includeCommand().handler("", includeContext());
+await waitFor(() => includeUi.state.component !== undefined, "TUI menu did not open");
+const includeText = includeUi.state.component.render(90).join("\n");
+check(includeText.includes("last rewrite — 2 written, 1 not included"), "TUI menu: rewrite report summary");
+check(includeText.includes("written · roles/snippets/tests.md"), "TUI menu: written row");
+check(
+	includeText.includes("not included · roles/snippets/orphan.md.template"),
+	"TUI menu: not included row",
+);
+includeUi.state.component.handleInput("\x1b");
+await includeTuiRun;
+includeSession.session.dispose();
+rmSync(includeRoot, { recursive: true, force: true });
+
 // ——— Esc in a value dialog returns to the menu ———
 const escRoot = mkdtempSync(join(tmpdir(), "pi-template-esc-"));
 process.env.PI_CODING_AGENT_DIR = join(escRoot, "agent");
@@ -690,7 +758,7 @@ check(
 	`the new variable did not reach the target: ${JSON.stringify(readFileSync(editTarget, "utf-8"))}`,
 );
 check(
-	editUi.state.notifications.some((notice) => notice.message === "pi-template: targets rewritten — 1 file(s)"),
+	editUi.state.notifications.some((notice) => notice.message === "pi-template: targets rewritten — 1 written"),
 	`rewrite message: ${JSON.stringify(editUi.state.notifications)}`,
 );
 editSession.session.dispose();
@@ -765,7 +833,10 @@ check(switchStatus() === "template ✓ role=preflight", `quick switch: status wi
 // Interactive mode passes its effective keybindings, where `app.session.rename`
 // defaults to ctrl+r: the extension wins and pi reports the conflict.
 const shortcuts = switchRunner.getShortcuts({ "app.session.rename": "ctrl+r" });
-check(shortcuts.has("ctrl+r") && shortcuts.has("alt+r"), `shortcuts registered: ${[...shortcuts.keys()].join(", ")}`);
+check(
+	shortcuts.has("ctrl+r") && shortcuts.has("alt+r") && shortcuts.has("ctrl+alt+r"),
+	`shortcuts registered: ${[...shortcuts.keys()].join(", ")}`,
+);
 check(
 	switchRunner.getShortcutDiagnostics().some((entry) => entry.message.includes("ctrl+r")),
 	`ctrl+r overrides the built-in rename session: ${JSON.stringify(switchRunner.getShortcutDiagnostics())}`,
@@ -799,6 +870,39 @@ check(
 
 await altR.handler(switchRunner.createContext());
 check(switchConfig().statusVariable === "role", `alt+r ring wrap: ${JSON.stringify(switchConfig().statusVariable)}`);
+
+// The first prompt assembly applies what changed before it: a quick switch
+// before the first turn reaches the prompt without an extra action.
+await ctrlR.handler(switchRunner.createContext());
+check(switchStatus() === "template ! role=develop", `pre-turn switch status: ${switchStatus()}`);
+const switchSections = {};
+await switchRunner.emit({
+	type: "before_agent_start",
+	messageType: "user",
+	prompt: "hello",
+	systemPrompt: "",
+	systemPromptOptions: switchSections,
+});
+check(
+	switchSections.contextFiles?.some((file) => file.content === "Role develop; mode plan; note draft"),
+	`the first prompt did not carry the pre-turn change: ${JSON.stringify(switchSections.contextFiles)}`,
+);
+check(switchStatus() === "template ✓ role=develop", `status after the first prompt assembly: ${switchStatus()}`);
+
+// ctrl+alt+r: apply without the menu — a mid-session change takes one press.
+const ctrlAltR = shortcuts.get("ctrl+alt+r");
+await ctrlR.handler(switchRunner.createContext());
+check(switchStatus() === "template ! role=preflight", `mid-session switch status: ${switchStatus()}`);
+await ctrlAltR.handler(switchRunner.createContext());
+check(
+	readFileSync(switchTarget, "utf-8") === "Role preflight; mode plan; note draft",
+	"ctrl+alt+r wrote the applied context",
+);
+check(switchStatus() === "template ✓ role=preflight", `ctrl+alt+r status: ${switchStatus()}`);
+check(
+	switchUi.state.notifications.at(-1)?.message === "pi-template: context updated",
+	`ctrl+alt+r message: ${switchUi.state.notifications.at(-1)?.message}`,
+);
 
 // Shortcuts are dispatched by the interactive mode only: an RPC or headless
 // call does nothing.

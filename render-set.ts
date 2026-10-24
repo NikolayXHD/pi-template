@@ -39,7 +39,18 @@ export interface RenderReport {
 	/** Target file texts: absolute target path → text (on failures — the previous success). */
 	texts: Record<string, string>;
 	problems: string[];
+	/** Render failures per file — the report of the rewrite button. */
+	failures: RenderFailure[];
 	warnings: string[];
+}
+
+/** Render failure of one source: the target keeps the previous successful text. */
+export interface RenderFailure {
+	/** Absolute path of the source. */
+	source: string;
+	/** Absolute path of the target. */
+	target: string;
+	problem: string;
 }
 
 /** Agent name of the file — the base name of the target file without the `.md` extension. */
@@ -64,6 +75,7 @@ export async function renderSources(
 ): Promise<RenderReport> {
 	const texts: Record<string, string> = {};
 	const problems: string[] = [];
+	const failures: RenderFailure[] = [];
 	const warnings: string[] = [];
 
 	for (const source of [...sources].sort((a, b) => (a.source < b.source ? -1 : a.source > b.source ? 1 : 0))) {
@@ -71,7 +83,9 @@ export async function renderSources(
 		try {
 			text = await renderSource(source, context, warnings);
 		} catch (error) {
-			problems.push(`${source.source}: ${errorMessage(error)}`);
+			const problem = errorMessage(error);
+			problems.push(`${source.source}: ${problem}`);
+			failures.push({ source: source.source, target: source.target, problem });
 		}
 		if (text === undefined) {
 			const previous = previousText(source.target);
@@ -80,7 +94,7 @@ export async function renderSources(
 		}
 		texts[source.target] = text;
 	}
-	return { texts, problems, warnings };
+	return { texts, problems, failures, warnings };
 }
 
 /**

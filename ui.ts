@@ -4,8 +4,9 @@
  * Menu (pi-tui, like the old roles extension): session context status,
  * variable values (computed ones with value age), changing overridable
  * variables, recomputing the given computed variable, recomputing all,
- * rewriting the targets ("rewrite files on disk") and the "update current
- * session context" button (`apply()`). The menu stays open after an action
+ * rewriting the targets ("rewrite files on disk" — the per-file report of the
+ * last rewrite stays in the menu) and the "update current session context"
+ * button (`apply()`). The menu stays open after an action
  * — close it with Esc.
  *
  * A variable change writes a `"var"` record (payload `{name, value}`) and
@@ -13,7 +14,8 @@
  * single `template` key: one glyph for the state plus the pair of the
  * variable named by the top-level `statusVariable`. The `ctrl+r`/`alt+r`
  * shortcuts cycle the value of that variable (a session override, no apply)
- * and the variable itself (written into `template.json`).
+ * and the variable itself (written into `template.json`); `ctrl+alt+r`
+ * applies the current version — the button action without the menu.
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
@@ -31,6 +33,8 @@ import {
 	variableStatusMark,
 	nextStatusVariable,
 	nextVariableValue,
+	rewriteRowText,
+	rewriteSummaryText,
 	statusLineText,
 	statusVariableChoices,
 	variableFacts,
@@ -140,6 +144,30 @@ export function clearTemplateStatus(ctx: ExtensionContext): void {
 	}
 }
 
+/**
+ * Apply the current version: the menu button and `ctrl+alt+r`. Delivery is
+ * on the next turn; nothing to apply — a warning, not a silent no-op.
+ */
+export function applyContext(ctx: ExtensionContext, session: TemplateSession): void {
+	const applied = session.apply();
+	updateTemplateStatus(ctx, session);
+	ctx.ui.notify(
+		applied ? "pi-template: context updated" : "pi-template: nothing to apply",
+		applied ? "info" : "warning",
+	);
+}
+
+/**
+ * `ctrl+alt+r`: apply without the menu. Shortcuts are dispatched by the
+ * interactive mode only, so outside it (RPC/headless) the call does nothing.
+ */
+export function applyCurrentContext(deps: TemplateUiDeps, ctx: ExtensionContext): void {
+	if (ctx.mode !== "tui") return;
+	const session = deps.sessionOf(ctx);
+	if (session === undefined || !session.ready()) return;
+	applyContext(ctx, session);
+}
+
 async function runTemplateCommand(pi: ExtensionAPI, deps: TemplateUiDeps, ctx: ExtensionCommandContext): Promise<void> {
 	const session = deps.sessionOf(ctx);
 	if (session === undefined) {
@@ -209,7 +237,9 @@ async function chooseMenuItem(
 	}
 	const labels = items.map((item) => menuRowText(item));
 	// Implicit `model`/`level` are shown read-only here too: the menu title and
-	const title = menuTitle(session);
+	// the summary of the last rewrite — the only place a dialog shows the report.
+	const report = session.lastRewriteReport();
+	const title = report === undefined ? menuTitle(session) : `${menuTitle(session)} · ${rewriteSummaryText(report)}`;
 	const chosen = await ctx.ui.select(title, labels);
 	if (chosen === undefined) return undefined;
 	const index = labels.indexOf(chosen);
@@ -290,6 +320,17 @@ function renderMenu(
 		);
 		lines.push(truncateToWidth(`${pointer}${theme.fg(color, segments.join(" · "))}`, renderWidth));
 	});
+	const report = session.lastRewriteReport();
+	if (report !== undefined) {
+		lines.push("");
+		lines.push(
+			truncateToWidth(theme.fg("dim", ` last rewrite — ${rewriteSummaryText(report)}`), renderWidth),
+		);
+		for (const file of report.files) {
+			const color: ThemeColor = file.status === "failed" ? "error" : file.status === "written" ? "text" : "muted";
+			lines.push(truncateToWidth(theme.fg(color, ` ${rewriteRowText(file)}`), renderWidth));
+		}
+	}
 	lines.push("");
 	lines.push(
 		truncateToWidth(
@@ -317,12 +358,8 @@ async function performMenuItem(
 			ctx.ui.notify("pi-template: nothing to rewrite", "warning");
 			return;
 		}
-		ctx.ui.notify(
-			report.changed > 0
-				? `pi-template: targets rewritten — ${report.changed} file(s)`
-				: "pi-template: targets are current — nothing to change",
-			"info",
-		);
+		const headline = report.changed > 0 ? "pi-template: targets rewritten" : "pi-template: targets are current";
+		ctx.ui.notify(`${headline} — ${rewriteSummaryText(report)}`, report.problems.length > 0 ? "warning" : "info");
 		if (report.problems.length > 0) {
 			ctx.ui.notify(
 				`pi-template: ${report.problems.length} file(s) failed to render — ${report.problems[0]}`,
@@ -332,12 +369,7 @@ async function performMenuItem(
 		return;
 	}
 	if (item.action === "apply") {
-		const applied = session.apply();
-		updateTemplateStatus(ctx, session);
-		ctx.ui.notify(
-			applied ? "pi-template: context updated — delivery on the next turn" : "pi-template: nothing to apply",
-			applied ? "info" : "warning",
-		);
+		applyContext(ctx, session);
 		return;
 	}
 	if (item.action === "recomputeAll") {
