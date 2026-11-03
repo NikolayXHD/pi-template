@@ -1,0 +1,12 @@
+/bin/
+/intercom/
+/missions/
+/sessions/
+/extensions/pi-permission-system/logs
+/run-history.jsonl
+/models-store.json
+.venv/
+.rumdl_cache/
+__pycache__/
+/pi-subagents/last-seen-version.json
+/roles/materialized/
