@@ -40,7 +40,7 @@ import {
 	parseVarsConfig,
 	subagentValue,
 } from "./vars.ts";
-import { lintTemplate, renderAgentBody, renderAgentHeader, renderTemplate } from "./render.ts";
+import { collectIncludeNames, lintTemplate, renderAgentBody, renderAgentHeader, renderTemplate } from "./render.ts";
 import { agentHeaderFacts, renderAgentFile } from "./agent.ts";
 import { agentNameFromPrompt, agentNameFromSessionName } from "./identity.ts";
 import { LOCK_TTL_MS, acquireLock, ownsLock, releaseLock, writeTargetUnderLock } from "./lock.ts";
@@ -1148,6 +1148,14 @@ scenario("when_rejected_forms_then_problem_reported", async () => {
 		["dynamic partial: undeclared segment", '{{> (concat "roles/" other ".md")}}'],
 		["dynamic partial: no value list", '{{> (concat "roles/" free ".md")}}'],
 		["dynamic partial: no segments", "{{> (concat)}}"],
+		["part call without arguments", "{{frontmatterKeys}}"],
+		["part call with two arguments", '{{frontmatterKeys "roles/a.md" "roles/b.md"}}'],
+		["part call with a hash", '{{frontmatterKeys name="roles/a.md"}}'],
+		["part name with ..", '{{frontmatterKeys "../x.md"}}'],
+		["absolute part name", '{{frontmatterKeys "/x.md"}}'],
+		["bare path part name", "{{frontmatterKeys roles/a.md}}"],
+		["part helper as a condition", '{{#if (frontmatterKeys "roles/a.md")}}A{{/if}}'],
+		["part name not found", '{{frontmatterKeys "ghost.md"}}'],
 	];
 	for (const [name, source] of genericRejections) {
 		const result = lintTemplate(source, lintContext());
@@ -1346,6 +1354,295 @@ scenario("when_boolean_variable_interpolated_then_string_value", async () => {
 		"false",
 		"false not printed",
 	);
+});
+
+// ============================================================================
+// Parts of a foreign file: frontmatterKeys / bodyAfterFrontmatter
+// ============================================================================
+
+/** BOM and line endings — as in pi's convention (the split contract). */
+function normalizeText(text) {
+	return text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+/** Both parts of one foreign file text — through the helpers, as the template sees them. */
+function partsOf(text) {
+	const partials = mockPartials(new Map([["foreign.md", text]]));
+	const context = { view: {}, variables: {}, partials };
+	const keys = renderTemplate('{{frontmatterKeys "foreign.md"}}', context);
+	const body = renderTemplate('{{bodyAfterFrontmatter "foreign.md"}}', context);
+	return { keys, body };
+}
+
+scenario("when_foreign_file_split_then_matrix_holds", async () => {
+	const rows = [
+		["LF, plain file", "---\na: 1\nb: 2\n---\nfile body\n", "a: 1\nb: 2", "file body"],
+		["CRLF", "---\r\na: 1\r\n---\r\nbody\r\n", "a: 1", "body"],
+		["lone CR", "---\ra: 1\r---\rbody", "a: 1", "body"],
+		["BOM in front", "\uFEFF---\na: 1\n---\nbody", "a: 1", "body"],
+		["empty frontmatter", "---\n---\nbody", "", "body"],
+		["trailing spaces on the closing line", "---\na: 1\n--- \nbody", "a: 1", "body"],
+		["--- inside the body", "---\na: 1\n---\nbefore\n---\nafter", "a: 1", "before\n---\nafter"],
+		["indented nested list", "---\ntools:\n  - read\n  - write\n---\nbody", "tools:\n  - read\n  - write", "body"],
+		["blank line before the closing line", "---\na: 1\n\n---\nbody", "a: 1", "body"],
+	];
+	for (const [name, text, keys, body] of rows) {
+		assertEqual(partsOf(text).keys, keys, `${name}: keys`);
+		assertEqual(partsOf(text).body, body, `${name}: body`);
+	}
+	const errors = [
+		["unclosed block", "---\na: 1\n", "unclosed frontmatter"],
+		["first line is not ---", "a: 1\n---\nbody", "no frontmatter"],
+		["---- as the first line", "----\na: 1\n---\nbody", "no frontmatter"],
+		["---- instead of the closing line", "---\na: 1\n----\nbody", "unclosed frontmatter"],
+		["--- text inside the block", "---\na: 1\n--- text\nbody", "unclosed frontmatter"],
+	];
+	for (const [name, text, problem] of errors) {
+		throws(() => partsOf(text), new RegExp(problem), name);
+	}
+});
+
+scenario("when_parts_reassembled_then_parse_unchanged", async () => {
+	const cases = [
+		["LF", "---\na: 1\n---\nbody"],
+		["CRLF", "---\r\na: 1\r\n---\r\nbody"],
+		["BOM", "\uFEFF---\na: 1\n---\nbody"],
+		["blank line before the closing line", "---\na: 1\n\n---\nbody"],
+		["--- inside the body", "---\na: 1\n---\nbefore\n---\nafter"],
+	];
+	for (const [name, text] of cases) {
+		const { keys, body } = partsOf(text);
+		const assembled = `---\n${keys}\n---\n${body}`;
+		assertEqual(simpleHeaderParser(assembled), simpleHeaderParser(normalizeText(text)), name);
+	}
+});
+
+scenario("when_key_inserted_into_parts_then_parse_keeps_upstream", async () => {
+	const cases = [
+		["LF", "---\na: 1\nb: 2\n---\nbody"],
+		["--- inside the body", "---\na: 1\n---\nbefore\n---\nafter"],
+		["empty frontmatter", "---\n---\nbody"],
+		["upstream key duplicate", "---\ntimeoutMs: 1\n---\nbody"],
+	];
+	for (const [name, text] of cases) {
+		const { keys, body } = partsOf(text);
+		const assembled = `---\n${keys}\ntimeoutMs: 3600000\n---\n${body}`;
+		const upstream = simpleHeaderParser(normalizeText(text));
+		assertEqual(
+			simpleHeaderParser(assembled),
+			{ ...upstream, timeoutMs: "3600000" },
+			`${name}: the inserted key changed the parsed frontmatter`,
+		);
+		assertEqual(partsOf(assembled).keys.split("\n").at(-1), "timeoutMs: 3600000", `${name}: our line is not last`);
+		assertEqual(partsOf(assembled).body, body, `${name}: body moved`);
+	}
+});
+
+scenario("when_part_name_forms_then_lint_accepts", async () => {
+	const cases = [
+		["literal", '{{frontmatterKeys "roles/a.md"}}', {}],
+		["variable", "{{frontmatterKeys name}}", { name: ["roles/a.md"] }],
+		["concat", '{{bodyAfterFrontmatter (concat "roles/" role ".md")}}', {}],
+	];
+	for (const [name, source, extra] of cases) {
+		const variables = { ...lintContext().variables, ...extra };
+		const result = lintTemplate(source, lintContext({ variables }));
+		assertEqual(result.problem, null, `${name}: rejected`);
+		assertEqual(result.warnings, [], `${name}: warnings`);
+	}
+});
+
+scenario("when_part_name_dynamic_then_resolves_at_render", async () => {
+	const foreign = "---\na: 1\n---\nbody text";
+	const partials = mockPartials(new Map([["roles/on.md", foreign]]));
+	const rendered = renderTemplate('{{bodyAfterFrontmatter (concat "roles/" vllm ".md")}}', {
+		view: { vllm: "on" },
+		variables: { vllm: ["on", "off"] },
+		partials,
+	});
+	assertEqual(rendered, "body text", "dynamic part name did not resolve");
+});
+
+scenario("when_part_helpers_then_foreign_parts_inserted", async () => {
+	const foreign = "---\nname: reviewer\ntools: read, grep\n---\nDisciplined review.\n";
+	const partials = mockPartials(new Map([["foreign.md", foreign]]));
+	const source = [
+		"---",
+		'{{frontmatterKeys "foreign.md"}}',
+		"timeoutMs: 3600000",
+		"---",
+		'{{bodyAfterFrontmatter "foreign.md"}}',
+	].join("\n");
+	assertEqual(
+		renderTemplate(source, { view: {}, variables: {}, partials }),
+		"---\nname: reviewer\ntools: read, grep\ntimeoutMs: 3600000\n---\nDisciplined review.",
+		"assembled file is wrong",
+	);
+});
+
+scenario("when_part_contains_raw_tags_then_warning_and_render_passes", async () => {
+	const foreign = "---\ndescription: use {{vllm}} here\n---\nSee {{#if x}} in prompts.\n";
+	const partials = mockPartials(new Map([["foreign.md", foreign]]));
+	const warnings = [];
+	const rendered = renderTemplate(
+		'{{frontmatterKeys "foreign.md"}}\n---\n{{bodyAfterFrontmatter "foreign.md"}}',
+		{ view: {}, variables: {}, partials, warnings },
+	);
+	assertEqual(
+		rendered,
+		"description: use {{vllm}} here\n---\nSee {{#if x}} in prompts.",
+		"the part text was altered",
+	);
+	assertEqual(
+		warnings,
+		[
+			'frontmatterKeys "foreign.md": the part contains {{ — it goes into the target as is',
+			'bodyAfterFrontmatter "foreign.md": the part contains {{ — it goes into the target as is',
+		],
+		"warnings are wrong",
+	);
+});
+
+scenario("when_agent_header_loop_then_part_warning_once", async () => {
+	const foreign = "---\ndescription: use {{vllm}} here\n---\nbody\n";
+	const partials = mockPartials(new Map([["foreign.md", foreign]]));
+	const warnings = [];
+	const preliminary = { model: "deepseek/deepseek-flash", level: "low" };
+	const source = ["---", '{{frontmatterKeys "foreign.md"}}', "model: {{[model@]}}", "---", "body"].join("\n") + "\n";
+	renderAgentHeader(
+		source,
+		{ agentName: "foo", variables: {}, partials, parentView: {}, subagentView: { ...preliminary }, warnings },
+		(header) => extractModelLevel(header, preliminary),
+	);
+	assertEqual(
+		warnings,
+		['frontmatterKeys "foreign.md": the part contains {{ — it goes into the target as is'],
+		"the warning is missing or duplicated across fixpoint passes",
+	);
+});
+
+scenario("when_agent_file_uses_parts_then_two_stage_render", async () => {
+	const foreign = "---\nname: reviewer\ntools: read\n---\nUpstream prompt.\n";
+	const partials = mockPartials(new Map([["foreign.md", foreign]]));
+	const source = [
+		"---",
+		'{{frontmatterKeys "foreign.md"}}',
+		"timeoutMs: 3600000",
+		"---",
+		'{{bodyAfterFrontmatter "foreign.md"}}',
+	].join("\n") + "\n";
+	const preliminary = { model: "prelim/model", level: "low" };
+	const base = { agentName: "foo", variables: {}, partials, parentView: {} };
+	const stage1 = renderAgentHeader(source, { ...base, subagentView: { ...preliminary } }, () => preliminary);
+	assertEqual(stage1.header, "---\nname: reviewer\ntools: read\ntimeoutMs: 3600000\n---", "header parts are wrong");
+	const body = renderAgentBody(source, { ...base, subagentView: { ...preliminary } });
+	assertEqual(body, "\nUpstream prompt.\n", "body part is wrong");
+});
+
+scenario("when_agent_part_name_without_subagent_value_then_throws", async () => {
+	const source = '{{bodyAfterFrontmatter (concat "roles/" [role@] ".md")}}';
+	throws(
+		() =>
+			renderAgentBody(source, {
+				agentName: "foo",
+				variables: { role: ["a", "b"] },
+				partials: mockPartials(new Map([["roles/a.md", "---\nk: v\n---\nbody"]])),
+				parentView: {},
+				subagentView: {},
+			}),
+		/subagent value for variable "role" is not set/,
+		"a missing subagent value did not fail the part name",
+	);
+});
+
+scenario("when_part_names_then_collected_and_stamped", async () => {
+	const collected = collectIncludeNames(
+		'{{frontmatterKeys "roles/a.md"}}\n{{bodyAfterFrontmatter (concat "roles/" role ".md")}}',
+		{ role: ["a", "b"] },
+	);
+	assertEqual(collected.problem, null, "part names broke the collection");
+	assertEqual(collected.names, ["roles/a.md", "roles/b.md"], "part names were not collected");
+	await withTempTree(async ({ agentDir, projectDir, write }) => {
+		write(
+			"agent/AGENTS.md.template",
+			['---', '{{frontmatterKeys "roles/gone.md"}}', "---", '{{bodyAfterFrontmatter "roles/gone.md"}}'].join("\n"),
+		);
+		const sources = discoverSources(agentDir, projectDir);
+		const problems = [];
+		const discovery = discoverIncludeSources({ sources, agentDir, projectDir, variables: {}, problems });
+		assertEqual(problems, [], "part names broke the discovery");
+		assert(
+			discovery.paths.includes(join(agentDir, "roles", "gone.md")),
+			"the part name target candidate was not stamped",
+		);
+		assert(
+			discovery.paths.includes(join(agentDir, "roles", "gone.md.template")),
+			"the part name source candidate was not stamped",
+		);
+	});
+});
+
+scenario("when_part_file_missing_then_previous_text_kept", async () => {
+	await withTempTree(async ({ agentDir, projectDir, write }) => {
+		write("agent/AGENTS.md.template", "Context");
+		write(
+			"agent/prompts/p.md.template",
+			['---', '{{frontmatterKeys "roles/gone.md"}}', "---", '{{bodyAfterFrontmatter "roles/gone.md"}}'].join("\n"),
+		);
+		const target = join(agentDir, "prompts", "p.md");
+		const report = await renderSources(
+			discoverSources(agentDir, projectDir),
+			{
+				view: {},
+				variables: {},
+				partials: createPartialResolver(agentDir, projectDir),
+				parseHeader: simpleHeaderParser,
+				subagentView: () => ({ parentView: {}, subagentView: {}, preliminary: { model: "m", level: "low" } }),
+			},
+			(targetPath) => (targetPath === target ? "previous part text" : undefined),
+		);
+		assert(
+			report.problems.some((problem) => problem.includes("p.md.template")),
+			"the failure does not name the source",
+		);
+		assertEqual(report.texts[target], "previous part text", "the target did not keep the previous text");
+		assertEqual(report.texts[join(agentDir, "AGENTS.md")], "Context", "other targets broke");
+	});
+});
+
+scenario("when_part_file_appears_after_failure_then_next_rewrite_writes", async () => {
+	await withTempTree(async ({ agentDir, projectDir, write }) => {
+		write(
+			"agent/AGENTS.md.template",
+			[
+				"---",
+				'{{frontmatterKeys "roles/gone.md"}}',
+				"timeoutMs: 3600000",
+				"---",
+				'{{bodyAfterFrontmatter "roles/gone.md"}}',
+			].join("\n"),
+		);
+		const target = join(agentDir, "AGENTS.md");
+		const sources = discoverSources(agentDir, projectDir);
+		const contextOf = () => ({
+			view: {},
+			variables: {},
+			partials: createPartialResolver(agentDir, projectDir),
+			parseHeader: simpleHeaderParser,
+			subagentView: () => ({ parentView: {}, subagentView: {}, preliminary: { model: "m", level: "low" } }),
+		});
+		const previous = (targetPath) => (targetPath === target ? "previous" : undefined);
+		const first = await renderSources(sources, contextOf(), previous);
+		assertEqual(first.texts[target], "previous", "a missing part file rewrote the target");
+		write("agent/roles/gone.md", "---\nname: upstream\n---\nUpstream prompt.");
+		const second = await renderSources(sources, contextOf(), previous);
+		assertEqual(second.problems, [], "the rewrite after the file appeared failed");
+		assertEqual(
+			second.texts[target],
+			"---\nname: upstream\ntimeoutMs: 3600000\n---\nUpstream prompt.",
+			"the target was not written after the file appeared",
+		);
+	});
 });
 
 // ============================================================================

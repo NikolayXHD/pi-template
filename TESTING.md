@@ -9,7 +9,7 @@ needs prompt delivery, the menu and cross-process reads.
 
 ## Automated check
 
-`node probe.mjs` — 125 scenarios without a framework and without a pi
+`node probe.mjs` — 138 scenarios without a framework and without a pi
 process: it prints `ok — name`, on failure `FAIL — name`, and `ALL OK` at
 the end. Coverage:
 
@@ -19,7 +19,9 @@ the end. Coverage:
   order, the boolean domain of inputs and `@` values, derivation chains,
   re-derivation over a changed view, child views); grammar and lint
   (legal and rejected forms, boolean variables and `and`/`or`/`not`, the
-  `@` qualifier, partials with resolution on disk, literals and levels),
+  `@` qualifier, partials with resolution on disk, part helpers
+  (`frontmatterKeys`/`bodyAfterFrontmatter`: the cut matrix, the roundtrip,
+  key insertion, raw-tag warnings), literals and levels),
   render (condition truthiness, connectives, include texts are read and
   linted when included), the two-stage agent file render;
 - **consumption points**: the target file lock (re-entry, foreign and stale
@@ -97,7 +99,10 @@ hand below.
   `skills/*/SKILL.md`, `prompts/*.md`, `agents/*.md` next to their sources, and
   the target of every mentioned `X.template` (include sources — for example
   `roles/snippets/tests.md` next to `roles/snippets/tests.md.template`); they
-  must not contain raw `{{…}}` tags.
+  must not contain raw `{{…}}` tags — except targets assembled from foreign
+  parts (`frontmatterKeys`/`bodyAfterFrontmatter`): the raw text of the
+  foreign file is expected there, and the warning `…: the part contains {{
+  — it goes into the target as is` names the file.
 - **Warnings** arrive as UI notifications; their text is part of the
   expected observation.
 
@@ -173,6 +178,16 @@ env-computed one.
     the status line redraws. On a variable whose value list failed to
     compute `ctrl+r` does nothing. pi reports the `ctrl+r` conflict with
     "rename session" at startup.
+15. **Foreign part (`reviewer.md.template`).** Put
+    `agents/reviewer.md.template` next to the package agent file
+    (`npm/node_modules/pi-subagents/agents/reviewer.md`): `frontmatterKeys`
+    and `bodyAfterFrontmatter` of that file with a `timeoutMs: 3600000` line
+    of your own between them. Expectation: `/template` writes
+    `agents/reviewer.md` with the upstream keys, the `timeoutMs` line after
+    them and the upstream body entirely; pi-subagents sees the raised
+    deadline and the unchanged prompt; an upstream edit shows in the target
+    on the next rewrite; with the upstream removed the target keeps the
+    previous text and the rewrite report names the failure with the reason.
 
 ## Known states and limitations
 

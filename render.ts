@@ -7,7 +7,13 @@
  * a boolean variable); interpolation `{{v}}` of declared variables;
  * partials — static (`{{> roles/snippets/tests.md}}` — the name is a path
  * from the root) and dynamic (`{{> (concat "roles/" role ".md")}}` —
- * `concat` of literal segments and variables); comments. Everything else is
+ * `concat` of literal segments and variables); part helpers —
+ * `{{frontmatterKeys "x"}}` and `{{bodyAfterFrontmatter "x"}}` return a
+ * part of a foreign file: the frontmatter keys (the lines inside the `---`
+ * wrapper) or the body, as is. The name argument is a string literal, a
+ * variable or `concat` — the partial name vocabulary; the part text is not
+ * a template (not rendered, not linted; a raw `{{` in it is a warning);
+ * comments. Everything else is
  * a lint error, not a silent render rejection.
  *
  * The `@` qualifier references a variable value at a subagent:
@@ -52,6 +58,9 @@ import { IMPLICIT_VARIABLE_NAMES, isAgentName } from "./vars.ts";
 export { THINKING_LEVELS } from "./expr.ts";
 
 const BLOCK_HELPERS = ["if", "unless"] as const;
+
+/** Helpers that return a part of a foreign file: the name is the only argument. */
+const PART_HELPERS = ["frontmatterKeys", "bodyAfterFrontmatter"] as const;
 
 export interface LintContext {
 	/** Variable name → known value list; `undefined` — no list. */
@@ -123,6 +132,10 @@ export function collectIncludeNames(
 	const visit = (node: hbs.AST.Node): void => {
 		if (node.type === "PartialStatement") {
 			names.push(...partialNames(node as hbs.AST.PartialStatement, variables));
+			return;
+		}
+		if (node.type === "MustacheStatement") {
+			names.push(...partCallNames(node as hbs.AST.MustacheStatement, variables));
 			return;
 		}
 		if (node.type !== "BlockStatement") return;
@@ -305,7 +318,9 @@ function collectQualifiedNames(source: string): string[] {
 	const walk = (body: hbs.AST.Node[]): void => {
 		for (const node of body) {
 			if (node.type === "MustacheStatement") {
-				addExpression((node as hbs.AST.MustacheStatement).path);
+				const mustache = node as hbs.AST.MustacheStatement;
+				addExpression(mustache.path);
+				for (const param of mustache.params) addExpression(param as hbs.AST.Expression);
 			} else if (node.type === "PartialStatement") {
 				addExpression((node as hbs.AST.PartialStatement).name);
 			} else if (node.type === "BlockStatement") {
@@ -412,6 +427,11 @@ function lintMustache(
 	}
 	if (node.escaped === false) {
 		issues.errors.push("triple braces {{{ }}} are not allowed");
+		return;
+	}
+	const helper = partHelperName(node);
+	if (helper !== undefined) {
+		lintPartCall(helper, node, context, issues);
 		return;
 	}
 	if (node.params.length > 0 || hasPairs(node.hash)) {
@@ -575,6 +595,72 @@ function isDeclaredVariable(name: string, context: LintInput): boolean {
 	return (IMPLICIT_VARIABLE_NAMES as readonly string[]).includes(name) || Object.hasOwn(context.variables, name);
 }
 
+/** The part-helper name of a mustache call; `undefined` — interpolation or another helper. */
+function partHelperName(node: hbs.AST.MustacheStatement): string | undefined {
+	const path = node.path;
+	if (path.type !== "PathExpression") return undefined;
+	const typed = path as hbs.AST.PathExpression;
+	if (typed.data || typed.depth !== 0 || typed.parts.length !== 1) return undefined;
+	return (PART_HELPERS as readonly string[]).includes(typed.parts[0]) ? typed.parts[0] : undefined;
+}
+
+/**
+ * Part-helper call: exactly one name argument. Handlebars resolves a bare
+ * name as an expression, so a name is a string literal, a variable or
+ * `concat` of them — a bare path is not a name.
+ */
+function lintPartCall(
+	helper: string,
+	node: hbs.AST.MustacheStatement,
+	context: LintInput,
+	issues: LintIssues,
+): void {
+	if (hasPairs(node.hash)) {
+		issues.errors.push(`${helper} takes no hash arguments`);
+		return;
+	}
+	if (node.params.length !== 1) {
+		issues.errors.push(`${helper} takes exactly one name argument`);
+		return;
+	}
+	lintPartName(helper, node.params[0] as hbs.AST.Expression, context, issues);
+}
+
+function lintPartName(
+	helper: string,
+	argument: hbs.AST.Expression,
+	context: LintInput,
+	issues: LintIssues,
+): void {
+	if (argument.type === "StringLiteral") {
+		const name = (argument as hbs.AST.StringLiteral).value;
+		const problem = staticNameProblem("part", name);
+		if (problem !== null) {
+			issues.errors.push(problem);
+			return;
+		}
+		if (!context.partials.exists(name)) {
+			issues.errors.push(`part "${name}" not found`);
+		}
+		return;
+	}
+	if (argument.type === "PathExpression") {
+		const path = argument as hbs.AST.PathExpression;
+		if (path.data || path.depth !== 0 || path.parts.length !== 1) {
+			issues.errors.push(`${helper}: "${path.original}" — expected a variable name`);
+			return;
+		}
+		const variable = lintNameVariable(helper, path.parts[0], context, issues);
+		if (variable !== undefined) lintNameSegments(helper, [variable], context, issues);
+		return;
+	}
+	if (argument.type === "SubExpression") {
+		lintDynamicName(helper, argument as hbs.AST.SubExpression, context, issues);
+		return;
+	}
+	issues.errors.push(`${helper}: name must be a string literal, a variable, or concat of them`);
+}
+
 function lintPartial(
 	node: hbs.AST.PartialStatement,
 	context: LintInput,
@@ -611,11 +697,11 @@ function lintPartial(
 		issues.errors.push("partial takes no arguments");
 		return;
 	}
-	lintDynamicPartial(node.name as hbs.AST.SubExpression, context, issues);
+	lintDynamicName("dynamic partial", node.name as hbs.AST.SubExpression, context, issues);
 }
 
 function staticPartial(name: string, context: LintInput, issues: LintIssues): void {
-	const nameProblem = staticPartialNameProblem(name);
+	const nameProblem = staticNameProblem("partial", name);
 	if (nameProblem) {
 		issues.errors.push(nameProblem);
 		return;
@@ -625,20 +711,22 @@ function staticPartial(name: string, context: LintInput, issues: LintIssues): vo
 	}
 }
 
-function staticPartialNameProblem(name: string): string | null {
-	if (name === "") return "partial name is empty";
+function staticNameProblem(what: string, name: string): string | null {
+	if (name === "") return `${what} name is empty`;
 	if (name.startsWith("/") || name.startsWith("\\")) {
-		return `partial "${name}" escapes the root`;
+		return `${what} "${name}" escapes the root`;
 	}
 	if (name.includes("..") || name.includes("\\")) {
-		return `partial "${name}" escapes the root`;
+		return `${what} "${name}" escapes the root`;
 	}
 	return null;
 }
 
 type ConcatSegment = { kind: "literal"; value: string } | { kind: "variable"; name: string };
 
-function lintDynamicPartial(
+/** A dynamic name: `concat` of literal segments and variables. */
+function lintDynamicName(
+	what: string,
 	subexpr: hbs.AST.SubExpression,
 	context: LintInput,
 	issues: LintIssues,
@@ -651,15 +739,15 @@ function lintDynamicPartial(
 		name.parts.length !== 1 ||
 		name.parts[0] !== "concat"
 	) {
-		issues.errors.push(`dynamic partial: expected concat of segments, got "${name.original}"`);
+		issues.errors.push(`${what}: expected concat of segments, got "${name.original}"`);
 		return;
 	}
 	if (hasPairs(subexpr.hash)) {
-		issues.errors.push("dynamic partial: concat takes no hash arguments");
+		issues.errors.push(`${what}: concat takes no hash arguments`);
 		return;
 	}
 	if (subexpr.params.length === 0) {
-		issues.errors.push("dynamic partial: concat without segments");
+		issues.errors.push(`${what}: concat without segments`);
 		return;
 	}
 	const segments: ConcatSegment[] = [];
@@ -672,39 +760,58 @@ function lintDynamicPartial(
 		if (param.type === "PathExpression") {
 			const path = param as hbs.AST.PathExpression;
 			if (path.data || path.depth !== 0 || path.parts.length !== 1) {
-				issues.errors.push(`dynamic partial: "${path.original}" — expected a variable name`);
+				issues.errors.push(`${what}: "${path.original}" — expected a variable name`);
 				return;
 			}
-			const reference = parseReference(path.parts[0]);
-			if ("problem" in reference) {
-				issues.errors.push(`dynamic partial: ${reference.problem}`);
-				return;
-			}
-			const qualifierProblem = checkQualifier(reference, "dynamic partial", context);
-			if (qualifierProblem !== null) {
-				issues.errors.push(qualifierProblem);
-				return;
-			}
-			if (!isDeclaredVariable(reference.name, context)) {
-				issues.errors.push(`dynamic partial: variable "${reference.name}" is not declared`);
-				return;
-			}
-			segments.push({ kind: "variable", name: reference.name });
+			const variable = lintNameVariable(what, path.parts[0], context, issues);
+			if (variable === undefined) return;
+			segments.push(variable);
 			continue;
 		}
-		issues.errors.push(`dynamic partial: segment must be a literal or a variable, got ${param.type}`);
+		issues.errors.push(`${what}: segment must be a literal or a variable, got ${param.type}`);
 		return;
 	}
+	lintNameSegments(what, segments, context, issues);
+}
 
-	const variables = segments.filter(
-		(segment): segment is Extract<ConcatSegment, { kind: "variable" }> => segment.kind === "variable",
-	);
-	for (const variable of variables) {
-		const values = context.variables[variable.name];
+/** A name variable: the `@` qualifier rules and the declaration check. */
+function lintNameVariable(
+	what: string,
+	name: string,
+	context: LintInput,
+	issues: LintIssues,
+): Extract<ConcatSegment, { kind: "variable" }> | undefined {
+	const reference = parseReference(name);
+	if ("problem" in reference) {
+		issues.errors.push(`${what}: ${reference.problem}`);
+		return undefined;
+	}
+	const qualifierProblem = checkQualifier(reference, what, context);
+	if (qualifierProblem !== null) {
+		issues.errors.push(qualifierProblem);
+		return undefined;
+	}
+	if (!isDeclaredVariable(reference.name, context)) {
+		issues.errors.push(`${what}: variable "${reference.name}" is not declared`);
+		return undefined;
+	}
+	return { kind: "variable", name: reference.name };
+}
+
+/** Resolved names of a dynamic name: the value lists and the existence check. */
+function lintNameSegments(
+	what: string,
+	segments: ConcatSegment[],
+	context: LintInput,
+	issues: LintIssues,
+): void {
+	for (const segment of segments) {
+		if (segment.kind !== "variable") continue;
+		const values = context.variables[segment.name];
 		// An empty successful list is as unresolvable as a missing list.
 		if (values === undefined || values.length === 0) {
 			issues.errors.push(
-				`dynamic partial: variable "${variable.name}" has no values list — nothing to resolve`,
+				`${what}: variable "${segment.name}" has no values list — nothing to resolve`,
 			);
 			return;
 		}
@@ -713,7 +820,7 @@ function lintDynamicPartial(
 		if (!context.partials.exists(resolved)) {
 			// Early warning instead of a failure mid-session: the value may
 			// never be selected, but the missing include is worth naming.
-			issues.warnings.push(`dynamic partial: name "${resolved}" not found`);
+			issues.warnings.push(`${what}: name "${resolved}" not found`);
 		}
 	}
 }
@@ -757,13 +864,28 @@ function renderLinted(
 	environment.registerHelper("if", ifHelper);
 	environment.registerHelper("unless", unlessHelper);
 	environment.registerHelper("concat", concatHelper);
+	environment.registerHelper("frontmatterKeys", (argument: unknown) =>
+		partHelper("frontmatterKeys", argument, context, warnings));
+	environment.registerHelper("bodyAfterFrontmatter", (argument: unknown) =>
+		partHelper("bodyAfterFrontmatter", argument, context, warnings));
 	for (const [name, text] of texts) {
 		environment.registerPartial(name, text);
 	}
 	const template = environment.compile(source, {
 		knownHelpersOnly: true,
 		noEscape: true,
-		knownHelpers: { eq: true, in: true, and: true, or: true, not: true, concat: true, if: true, unless: true },
+		knownHelpers: {
+			eq: true,
+			in: true,
+			and: true,
+			or: true,
+			not: true,
+			concat: true,
+			if: true,
+			unless: true,
+			frontmatterKeys: true,
+			bodyAfterFrontmatter: true,
+		},
 	});
 	return template(view);
 }
@@ -875,6 +997,29 @@ function partialNames(
 	return segments === undefined ? [] : resolveConcatNames(segments, variables);
 }
 
+/**
+ * Include names of one part-helper call: the name argument — a string
+ * literal, a variable or `concat` — resolved over the value lists.
+ */
+function partCallNames(
+	node: hbs.AST.MustacheStatement,
+	variables: Record<string, string[] | undefined>,
+): string[] {
+	if (partHelperName(node) === undefined || node.params.length !== 1) return [];
+	const argument = node.params[0] as hbs.AST.Expression;
+	if (argument.type === "StringLiteral") return [(argument as hbs.AST.StringLiteral).value];
+	if (argument.type === "PathExpression") {
+		const path = argument as hbs.AST.PathExpression;
+		if (path.data || path.depth !== 0 || path.parts.length !== 1) return [];
+		const reference = parseReference(path.parts[0]);
+		if ("problem" in reference) return [];
+		return resolveConcatNames([{ kind: "variable", name: reference.name }], variables);
+	}
+	if (argument.type !== "SubExpression") return [];
+	const segments = concatSegmentsOf(argument as hbs.AST.SubExpression);
+	return segments === undefined ? [] : resolveConcatNames(segments, variables);
+}
+
 /** `concat` segments of a dynamic name; `undefined` — not a concat of literals and variables. */
 function concatSegmentsOf(subexpr: hbs.AST.SubExpression): ConcatSegment[] | undefined {
 	const name = subexpr.path;
@@ -905,6 +1050,62 @@ function concatSegmentsOf(subexpr: hbs.AST.SubExpression): ConcatSegment[] | und
 		return undefined;
 	}
 	return segments;
+}
+
+/**
+ * Part helper: the frontmatter keys of a foreign file or its body. The part
+ * text is inserted as is — the foreign file is not our template.
+ */
+function partHelper(helper: string, argument: unknown, context: LintInput, warnings?: string[]): string {
+	if (typeof argument !== "string") {
+		throw new Error(`${helper}: name did not resolve to a string`);
+	}
+	const text = context.partials.read(argument);
+	if (text === undefined) throw new Error(`part "${argument}" not found`);
+	const parts = splitFrontmatterParts(text);
+	if ("problem" in parts) throw new Error(`${helper} "${argument}": ${parts.problem}`);
+	const part = helper === "frontmatterKeys" ? parts.keys : parts.body;
+	if (part.includes("{{")) {
+		warnOnce(warnings, `${helper} "${argument}": the part contains {{ — it goes into the target as is`);
+	}
+	return part;
+}
+
+/** Warning text once per collector: the agent header renders in a fixpoint loop. */
+function warnOnce(warnings: string[] | undefined, text: string): void {
+	if (warnings !== undefined && !warnings.includes(text)) warnings.push(text);
+}
+
+/**
+ * File cut: the frontmatter keys (the lines inside the `---` wrapper, blank
+ * edge lines dropped) and the body (trimmed). The wrapper lines are `---`
+ * up to a leading BOM and trailing spaces.
+ */
+function splitFrontmatterParts(source: string): { keys: string; body: string } | { problem: string } {
+	const lines = normalizeAgentText(source).split("\n");
+	if (!isWrapperLine(lines[0] ?? "")) return { problem: "no frontmatter" };
+	for (let index = 1; index < lines.length; index += 1) {
+		if (!isWrapperLine(lines[index])) continue;
+		return {
+			keys: trimBlankLines(lines.slice(1, index)).join("\n"),
+			body: lines.slice(index + 1).join("\n").trim(),
+		};
+	}
+	return { problem: "unclosed frontmatter" };
+}
+
+/** The `---` wrapper line — up to trailing spaces. */
+function isWrapperLine(line: string): boolean {
+	return /^---[ \t]*$/.test(line);
+}
+
+/** Blank lines at both edges of the keys slice are dropped; interior untouched. */
+function trimBlankLines(lines: string[]): string[] {
+	let first = 0;
+	let last = lines.length;
+	while (first < last && lines[first].trim() === "") first += 1;
+	while (last > first && lines[last - 1].trim() === "") last -= 1;
+	return lines.slice(first, last);
 }
 
 function eqHelper(left: unknown, right: unknown): boolean {

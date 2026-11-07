@@ -186,10 +186,34 @@ error, not a silent rejection:
   `{{> ".pi/skills/x/SKILL.md"}}`; a dynamic partial is
   `{{> (concat "modes/" mode ".md")}}`, `concat` of literal segments and
   variables, the name is checked for every value in the list;
+- **part helpers**: `{{frontmatterKeys "x"}}` and
+  `{{bodyAfterFrontmatter "x"}}` — the frontmatter keys of a foreign file
+  (the lines inside the `---` wrapper) or its body, as is. The wrapper is
+  written by the template, so a foreign agent file is re-used with your own
+  keys (a `timeoutMs` line) added. The name argument is a string literal, a
+  variable or `concat` — the partial name vocabulary; a bare path is not a
+  name (an argument resolves as an expression). The cut is strict: the first
+  line is `---` up to a BOM and trailing spaces, the closing line is `---`
+  up to trailing spaces — otherwise `no frontmatter` / `unclosed
+  frontmatter`. A missing static name is a lint error, a missing dynamic one
+  is a warning and a render error for the selected value (as partials). The
+  part text is not a template — not rendered, not linted; a raw `{{` in it
+  is a warning, and such a target legitimately contains raw tags;
 - comments `{{! … }}`; a literal `{{` in text is escaped as `\{{`;
 - frontmatter is rendered alongside the body; a rendered file with
   frontmatter is validated by YAML parsing — skill descriptions and agent
   headers live there.
+
+Part helpers in `agents/reviewer.md.template` — the agent file of a package
+with your own `timeoutMs` in frontmatter:
+
+```md
+---
+{{frontmatterKeys "npm/node_modules/pi-subagents/agents/reviewer.md"}}
+timeoutMs: 3600000
+---
+{{bodyAfterFrontmatter "npm/node_modules/pi-subagents/agents/reviewer.md"}}
+```
 
 **The `@` qualifier** references a variable value at a subagent:
 `{{[vllm@]}}` (any subagent) and `{{[vllm@foo]}}` (agent `foo`). It is
