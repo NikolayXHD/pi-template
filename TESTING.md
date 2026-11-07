@@ -9,12 +9,13 @@ needs prompt delivery, the menu and cross-process reads.
 
 ## Automated check
 
-`node probe.mjs` — 138 scenarios without a framework and without a pi
+`node probe.mjs` — 140 scenarios without a framework and without a pi
 process: it prints `ok — name`, on failure `FAIL — name`, and `ALL OK` at
 the end. Coverage:
 
 - **engine**: `template.json` parsing, the shell value contract and command
-  environment, `@` values, strict canonical serialization; `compute`
+  environment, `@` values, the implicit `model`/`level` with the model
+  address parts, strict canonical serialization; `compute`
   expressions (forms, broken expressions, references and the declaration
   order, the boolean domain of inputs and `@` values, derivation chains,
   re-derivation over a changed view, child views); grammar and lint

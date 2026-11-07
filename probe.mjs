@@ -36,6 +36,7 @@ import {
 	firstShellLine,
 	isComputedVariable,
 	loadVarsConfig,
+	modelParts,
 	parseShellLines,
 	parseVarsConfig,
 	subagentValue,
@@ -345,6 +346,49 @@ scenario("when_compute_references_then_declared_earlier_only", async () => {
 	assert("problem" in self && self.problem.includes('"loop"'), `self reference accepted: ${self.problem ?? ""}`);
 	const implicit = parseVarsConfig(JSON.stringify({ vars: { is_flash: { compute: 'in model "a" "b"' } } }), NO_ENV);
 	assert(!("problem" in implicit), `implicit reference rejected: ${implicit.problem ?? ""}`);
+	const parts = parseVarsConfig(
+		JSON.stringify({
+			vars: {
+				is_flash: { compute: 'in model_id "z-ai/glm-5.3-flash"' },
+				tag: { compute: 'eq model_provider "caila"' },
+			},
+		}),
+		NO_ENV,
+	);
+	assert(!("problem" in parts), `model parts reference rejected: ${parts.problem ?? ""}`);
+	for (const name of ["model", "level", "model_provider", "model_id"]) {
+		const declared = parseVarsConfig(JSON.stringify({ vars: { [name]: { initial: "x" } } }), NO_ENV);
+		assert("problem" in declared, `implicit variable "${name}" declared and accepted`);
+	}
+});
+
+scenario("when_model_address_split_then_model_parts", async () => {
+	const cases = [
+		["caila/z-ai/glm-5.3-flash", "caila", "z-ai/glm-5.3-flash"],
+		["openrouter/xiaomi/mimo-v2.6-pro", "openrouter", "xiaomi/mimo-v2.6-pro"],
+		["deepseek-flash", "", "deepseek-flash"],
+	];
+	for (const [model, model_provider, model_id] of cases) {
+		assertEqual(modelParts(model), { model, model_provider, model_id }, `address ${model}`);
+	}
+});
+
+scenario("when_model_address_implicit_then_parts_in_view", async () => {
+	await withTempTree(async ({ agentDir, projectDir, write }) => {
+		write(
+			"agent/template.json",
+			JSON.stringify({ vars: { is_flash: { compute: 'in model_id "z-ai/glm-5.3-flash"' } } }),
+		);
+		write("agent/AGENTS.md.template", "p={{model_provider}} i={{model_id}} f={{is_flash}}");
+		const session = makeSession({ agentDir, projectDir, parseHeader: simpleHeaderParser, env: {}, execute: noShell });
+		await session.start(sessionHost([], "caila/z-ai/glm-5.3-flash", "low"), "startup");
+		assert(session.ready(), "session not ready — the config with model parts was rejected");
+		assertEqual(
+			readFileSync(join(agentDir, "AGENTS.md"), "utf-8"),
+			"p=caila i=z-ai/glm-5.3-flash f=true",
+			"model parts are not in the view",
+		);
+	});
 });
 
 scenario("when_reserved_name_declared_then_problem", async () => {
@@ -3781,6 +3825,8 @@ scenario("when_menu_facts_from_session_then_age_and_override", async () => {
 				["who", false, true],
 				["branch", true, false],
 				["model", false, false],
+				["model_provider", false, false],
+				["model_id", false, false],
 				["level", false, false],
 			],
 			"session facts for the menu",
@@ -3789,7 +3835,17 @@ scenario("when_menu_facts_from_session_then_age_and_override", async () => {
 
 		assertEqual(
 			menuItems(facts).map((item) => item.action),
-			["change", "recompute", "implicit", "implicit", "recomputeAll", "rewriteFiles", "apply"],
+			[
+				"change",
+				"recompute",
+				"implicit",
+				"implicit",
+				"implicit",
+				"implicit",
+				"recomputeAll",
+				"rewriteFiles",
+				"apply",
+			],
 			"menu actions from the session facts",
 		);
 		session.shutdown("quit");

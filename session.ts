@@ -55,6 +55,7 @@ import {
 	isComputedVariable,
 	isDerivedVariable,
 	loadVarsConfig,
+	modelParts,
 	writeStatusVariable,
 } from "./vars.ts";
 
@@ -313,7 +314,7 @@ export class TemplateSession {
 		if (config === undefined) return;
 		this.childViews.clear();
 		const implicit: Record<string, string> = {};
-		if (host.model) implicit.model = host.model;
+		if (host.model) Object.assign(implicit, modelParts(host.model));
 		if (host.level) implicit.level = host.level;
 		const overrides: Record<string, string> = { ...this.overrides };
 		for (const [name, value] of Object.entries(host.overrides ?? {})) {
@@ -441,13 +442,14 @@ export class TemplateSession {
 		model: string,
 		level: string,
 	): Promise<ChildView> {
-		const child: ChildView = { view: { model, level }, values: {} };
+		const modelValues = modelParts(model);
+		const child: ChildView = { view: { ...modelValues, level }, values: {} };
 		if (this.config !== undefined) {
 			const report = await computeView({
 				config: this.config,
 				agentDir: this.agentDir,
 				projectDir: this.projectDir,
-				implicit: { model, level },
+				implicit: { ...modelValues, level },
 				agentName,
 				env: this.env,
 				execute: this.execute,
@@ -1263,7 +1265,7 @@ export class TemplateSession {
 	/** Implicit view values for recompute: model/level and session overrides. */
 	private implicitView(): Record<string, string> {
 		const implicit: Record<string, string> = { ...this.overrides };
-		if (this.view.model !== undefined) implicit.model = this.view.model;
+		if (this.view.model !== undefined) Object.assign(implicit, modelParts(this.view.model));
 		if (this.view.level !== undefined) implicit.level = this.view.level;
 		return implicit;
 	}

@@ -168,7 +168,8 @@ error, not a silent rejection:
   `compute` expression): `{{#if is_flash}}…{{/if}}`. Truth is the exact
   string `"true"`, anything else — including `"false"` — is false;
 - interpolation `{{mode}}` — declared variables and the implicit
-  `{{model}}`/`{{level}}`;
+  `{{model}}`/`{{level}}` with the model address parts
+  `{{model_provider}}`/`{{model_id}}`;
 - **partials**: `{{> roles/snippets/tests.md}}` — the name is a path from
   the root of its directory (agent ones from the agent directory, project
   ones from the project root with the `.pi/` prefix). The name is resolved

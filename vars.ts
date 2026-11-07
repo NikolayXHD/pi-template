@@ -10,8 +10,9 @@
  * `@<agent name>` (a specific one, over `@`) — strings only, they replace
  * both the machine and the computed value. The top-level `statusVariable`
  * names the variable the status line shows. An unknown key is a config
- * error. The `model` and `level` variables are implicit; declaring them is
- * an error.
+ * error. The `model`, `level`, `model_provider` and `model_id` variables are
+ * implicit — the session model address `provider/id` and its parts;
+ * declaring them is an error.
  *
  * Shell contract:
  * - commands run in the platform system shell (POSIX — `sh -c`, win32 —
@@ -63,7 +64,21 @@ const RESERVED_NAMES = ["and", "or", "not", "eq", "in"] as const;
 const AGENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
 /** Implicit variables: not declared in the config, they come in through the view. */
-export const IMPLICIT_VARIABLE_NAMES = ["model", "level"] as const;
+export const IMPLICIT_VARIABLE_NAMES = ["model", "level", "model_provider", "model_id"] as const;
+
+/**
+ * Implicit values of the session model address `provider/id`: the address
+ * itself and its parts — `model_provider` before the first slash, `model_id`
+ * the rest. An address without a slash is a bare id.
+ */
+export function modelParts(model: string): Record<string, string> {
+	const slash = model.indexOf("/");
+	return {
+		model,
+		model_provider: slash === -1 ? "" : model.slice(0, slash),
+		model_id: slash === -1 ? model : model.slice(slash + 1),
+	};
+}
 
 export interface ShellCommand {
 	shell: string;
